@@ -1,0 +1,70 @@
+# ColBERTv2 Default Configuration
+
+# Model
+checkpoint: "google-bert/bert-base-uncased"
+dim: 128
+similarity: "cosine"
+mask_punctuation: true
+attn_implementation: "flash_attention_2"   # "flash_attention_2", "sdpa", or "eager"
+torch_dtype: "bfloat16"                    # "float32", "float16"/"fp16", or "bfloat16"/"bf16"
+
+# Tokenization
+query_maxlen: 32
+doc_maxlen: 180
+
+# Training — Phase 1 (triples)
+bsize: 768
+accumsteps: 1
+lr: 1.0e-5
+warmup: 1333
+maxsteps: 10000
+
+# Training — Phase 2 (distillation)
+distill_bsize: 32
+distill_lr: 1.0e-5
+distill_warmup: 20000
+distill_maxsteps: 400000
+nway: 64
+cross_encoder: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+top_k_distill: 500
+distill_rounds: 2
+
+# Indexing
+nbits: 2
+kmeans_niters: 4
+
+# Retrieval
+nprobe: 2
+ncandidates_factor: 4096   # ncandidates = nprobe * ncandidates_factor
+retrieve_top_k: 1000
+
+# Data paths
+data_dir: "data"
+collection: "data/collection.tsv"
+queries_train: "data/queries.train.tsv"
+queries_dev: "data/queries.dev.small.tsv"
+qrels_train: "data/qrels.train.tsv"
+qrels_dev: "data/qrels.dev.small.tsv"
+triples: "data/triples.train.small.tsv"
+tuples_dir: "data/tuples"
+
+# Output paths
+output_dir: "experiments"
+index_path: "experiments/index"
+checkpoint_dir: "experiments/checkpoints"
+
+# Logging
+log_every: 10
+save_every: 1000
+
+# Wandb
+wandb_enabled: false
+wandb_project: "colbertv2"
+wandb_entity: ""
+wandb_run_name: "bs_256_per_gpu"
+
+# BEIR / LoTTE evaluation
+beir_data_dir: "data/beir"
+lotte_data_dir: "data/lotte"
+beir_doc_maxlen: 300
+lotte_doc_maxlen: 300
