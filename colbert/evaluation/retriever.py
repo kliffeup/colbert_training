@@ -63,7 +63,7 @@ class ColBERTRetriever:
         queries: List[str],
         top_k: int | None = None,
         query_maxlen: int | None = None,
-    ) -> Dict[int, List[Tuple[int, float]]]:
+    ) -> Dict[int, List[Tuple[str, float]]]:
         """Retrieve top-k passages for each query.
 
         Args:
@@ -73,10 +73,11 @@ class ColBERTRetriever:
 
         Returns:
             Dict mapping query index -> [(pid, score), ...] sorted descending.
+            Pids are strings (e.g. "D123456" or "D123456_p7").
         """
         top_k = top_k or self.config.retrieve_top_k
         amp_dtype = self.config.resolved_torch_dtype
-        results: Dict[int, List[Tuple[int, float]]] = {}
+        results: Dict[int, List[Tuple[str, float]]] = {}
 
         for q_idx, query in enumerate(tqdm(queries, desc="Retrieving")):
             with autocast("cuda", dtype=amp_dtype):
@@ -92,7 +93,7 @@ class ColBERTRetriever:
         self,
         Q: torch.Tensor,
         top_k: int,
-    ) -> List[Tuple[int, float]]:
+    ) -> List[Tuple[str, float]]:
         """Retrieve for a single query.
 
         Args:
@@ -100,7 +101,7 @@ class ColBERTRetriever:
             top_k: Number of passages to return.
 
         Returns:
-            [(pid, score), ...] sorted by score descending.
+            [(pid, score), ...] sorted by score descending. Pids are strings.
         """
         nprobe = self.config.nprobe
         ncandidates = self.config.ncandidates
@@ -152,7 +153,7 @@ class ColBERTRetriever:
         candidate_doc_idxs = [d[0] for d in sorted_docs[:ncandidates]]
 
         # Step 6: Exact re-ranking with full passage embeddings
-        final_scores: List[Tuple[int, float]] = []
+        final_scores: List[Tuple[str, float]] = []
         for doc_idx in candidate_doc_idxs:
             start = int(self._doc_offsets[doc_idx])
             end = int(self._doc_offsets[doc_idx + 1])
@@ -165,7 +166,7 @@ class ColBERTRetriever:
             sim = Q @ doc_embs.t()  # (qlen, doclen)
             score = sim.max(dim=1).values.sum().item()
 
-            pid = int(self.pids[doc_idx])
+            pid = str(self.pids[doc_idx])
             final_scores.append((pid, score))
 
         final_scores.sort(key=lambda x: x[1], reverse=True)

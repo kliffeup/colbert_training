@@ -46,11 +46,22 @@ class IndexSaver:
     def load_doclens(self) -> np.ndarray:
         return np.load(self.index_dir / "doclens.npy")
 
-    def save_pids(self, pids: np.ndarray) -> None:
-        np.save(self.index_dir / "pids.npy", pids)
+    def save_pids(self, pids) -> None:
+        """Save pids as a UTF-8 text file (one id per line) to support arbitrary string IDs."""
+        with open(self.index_dir / "pids.txt", "w", encoding="utf-8") as f:
+            for pid in pids:
+                f.write(f"{pid}\n")
 
-    def load_pids(self) -> np.ndarray:
-        return np.load(self.index_dir / "pids.npy")
+    def load_pids(self) -> List[str]:
+        """Load pids as a List[str]. Falls back to legacy `pids.npy` if `pids.txt` is absent
+        so previously-built passage-only indexes keep loading."""
+        txt_path = self.index_dir / "pids.txt"
+        if txt_path.exists():
+            with open(txt_path, encoding="utf-8") as f:
+                return [line.rstrip("\n") for line in f]
+        # Legacy passage-only path
+        legacy = np.load(self.index_dir / "pids.npy")
+        return [str(p) for p in legacy]
 
     def save_inverted_lists(self, inverted_lists: Dict[int, List[int]]) -> None:
         # Store as dict of int -> list[int], serialized to a compact format

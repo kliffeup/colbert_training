@@ -78,12 +78,18 @@ def main():
     # Step 4: Build distillation tuples
     logger.info("Step 4: Building distillation tuples")
     output_path = args.output or str(Path(config.tuples_dir) / "tuples.jsonl")
+    pmap_path = (
+        config.passage_to_doc_map
+        if config.task == "document" and config.doc_segmentation == "maxp"
+        else None
+    )
     build_tuples(
         config,
         ce_scores,
         queries,
         qrels_path=config.qrels_train,
         output_path=output_path,
+        passage_to_doc_map_path=pmap_path,
     )
 
     logger.info(f"Distillation tuples written to {output_path}")

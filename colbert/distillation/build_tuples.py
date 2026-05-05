@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 from colbert.config import ColBERTConfig
 from colbert.data.queries import Queries
@@ -16,10 +16,11 @@ logger = logging.getLogger(__name__)
 
 def build_tuples(
     config: ColBERTConfig,
-    ce_scores: Dict[int, List[Tuple[int, float]]],
+    ce_scores: Dict[Any, List[Tuple[Any, float]]],
     queries: Queries,
     qrels_path: str | None = None,
     output_path: str | None = None,
+    passage_to_doc_map_path: str | None = None,
 ) -> str:
     """Build nway distillation tuples from cross-encoder scores.
 
@@ -33,6 +34,9 @@ def build_tuples(
         queries: Query reader.
         qrels_path: Path to qrels file (optional, for labeled positives).
         output_path: Where to write tuples JSONL.
+        passage_to_doc_map_path: When provided (MaxP mode), qrels are interpreted as
+            doc-level. A passage hit counts as a positive iff its docid is in the
+            qrels' positive doc set for the query.
 
     Returns:
         Path to the written tuples file.
@@ -40,10 +44,18 @@ def build_tuples(
     out = Path(output_path or (config.tuples_dir + "/tuples.jsonl"))
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    positives: Dict[int, Set[int]] = {}
+    positives: Dict[Any, Set[Any]] = {}
+    pid_to_doc: Dict[str, str] | None = None
     if qrels_path:
         qrels = load_qrels(qrels_path)
         positives = get_positive_pids(qrels)
+        if passage_to_doc_map_path:
+            from colbert.documents.passage_doc_map import PassageDocMap
+            pid_to_doc = PassageDocMap.load(passage_to_doc_map_path).mapping
+            logger.info(
+                f"MaxP mode: loaded passage->doc map ({len(pid_to_doc):,} entries). "
+                f"Positives are matched at the document level."
+            )
 
     nway = config.nway
     count = 0
@@ -60,11 +72,18 @@ def build_tuples(
             query_text = queries[qid]
             qid_positives = positives.get(qid, set())
 
-            # Determine positive: labeled positive if available, else top CE-scored
+            # Determine positive: labeled positive if available, else top CE-scored.
+            # In MaxP mode `qid_positives` is a set of docids; a passage hit counts as
+            # a positive when its passage->doc mapping lands in that set.
             positive_pid = None
             positive_score = None
             for pid, score in scored_pids:
-                if pid in qid_positives:
+                is_pos = (
+                    pid in qid_positives
+                    if pid_to_doc is None
+                    else pid_to_doc.get(pid) in qid_positives
+                )
+                if is_pos:
                     positive_pid = pid
                     positive_score = score
                     break

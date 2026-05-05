@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from transformers import BertModel
+from transformers import AutoModel
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,11 @@ from colbert.modeling.similarity import colbert_score
 
 
 class ColBERT(nn.Module):
-    """ColBERTv2 model: shared BERT encoder + linear projection + L2 normalization."""
+    """ColBERTv2 model: shared encoder + linear projection + L2 normalization.
+
+    Encoder is loaded via AutoModel so any HF backbone (BERT, ModernBERT, DeBERTa, ...)
+    can be plugged in via config.checkpoint.
+    """
 
     def __init__(self, config: ColBERTConfig):
         super().__init__()
@@ -25,13 +29,13 @@ class ColBERT(nn.Module):
         attn_impl = config.attn_implementation
         model_dtype = config.resolved_torch_dtype
         try:
-            self.bert = BertModel.from_pretrained(
+            self.bert = AutoModel.from_pretrained(
                 config.checkpoint,
                 attn_implementation=attn_impl,
                 torch_dtype=model_dtype,
             )
             logger.info(
-                f"Loaded BERT with attn_implementation='{attn_impl}', "
+                f"Loaded encoder '{config.checkpoint}' with attn_implementation='{attn_impl}', "
                 f"torch_dtype={model_dtype}"
             )
         except (ValueError, ImportError) as e:
@@ -39,7 +43,7 @@ class ColBERT(nn.Module):
                 f"Failed to load with attn_implementation='{attn_impl}': {e}. "
                 f"Falling back to default attention."
             )
-            self.bert = BertModel.from_pretrained(
+            self.bert = AutoModel.from_pretrained(
                 config.checkpoint, torch_dtype=model_dtype
             )
 
@@ -47,6 +51,13 @@ class ColBERT(nn.Module):
 
         self.query_tokenizer = QueryTokenizer(config)
         self.doc_tokenizer = DocTokenizer(config)
+
+        # If the tokenizer had to add new special tokens for [Q]/[D] markers (e.g. on
+        # encoders without [unused0]/[unused1] slots), grow the embedding matrix to match.
+        added = self.query_tokenizer.num_added_tokens
+        if added > 0:
+            self.bert.resize_token_embeddings(len(self.query_tokenizer.tok))
+            logger.info(f"Resized encoder embeddings to fit {added} new marker token(s).")
 
     def forward(
         self,

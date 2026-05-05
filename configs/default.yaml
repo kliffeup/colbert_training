@@ -12,6 +12,15 @@ torch_dtype: "bfloat16"                    # "float32", "float16"/"fp16", or "bf
 query_maxlen: 32
 doc_maxlen: 180
 
+# Document training (defaults are passage-mode no-ops)
+task: "passage"                  # "passage" | "document"
+doc_segmentation: "none"         # "none" (end-to-end long doc) | "maxp" (sliding-window passages)
+passage_window: 180              # tokens per window in maxp mode
+passage_stride: 90
+max_passages_per_doc_factor: 4   # K' = retrieve_top_k * factor when aggregating passage scores -> docs
+field_format: "title_body"       # "body_only" | "title_body" | "url_title_body" | "tagged"
+field_format_template: "<title>{title}</title><body>{body}</body>"
+
 # Training — Phase 1 (triples)
 bsize: 768
 accumsteps: 1
@@ -47,6 +56,10 @@ qrels_train: "data/qrels.train.tsv"
 qrels_dev: "data/qrels.dev.small.tsv"
 triples: "data/triples.train.small.tsv"
 tuples_dir: "data/tuples"
+
+# Document data paths (used when task == "document")
+documents_dir: "data/docs"
+passage_to_doc_map: "data/docs/passage_to_doc.tsv"
 
 # Output paths
 output_dir: "experiments"

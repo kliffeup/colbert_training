@@ -31,6 +31,15 @@ class ColBERTConfig:
     query_maxlen: int = 32
     doc_maxlen: int = 180
 
+    # Document training
+    task: str = "passage"                    # "passage" | "document"
+    doc_segmentation: str = "none"           # "none" (end-to-end) | "maxp" (sliding-window passages)
+    passage_window: int = 180                # tokens per window in maxp mode (independent of encoder maxlen)
+    passage_stride: int = 90
+    max_passages_per_doc_factor: int = 4     # K' = retrieve_top_k * factor when aggregating maxp passages → docs
+    field_format: str = "title_body"         # "body_only" | "title_body" | "url_title_body" | "tagged"
+    field_format_template: str = "<title>{title}</title><body>{body}</body>"
+
     # Training — Phase 1 (triples)
     bsize: int = 32
     accumsteps: int = 1
@@ -67,6 +76,10 @@ class ColBERTConfig:
     triples: str = "data/triples.train.small.tsv"
     tuples_dir: str = "data/tuples"
 
+    # Document data paths (used when task == "document")
+    documents_dir: str = "data/docs"
+    passage_to_doc_map: str = "data/docs/passage_to_doc.tsv"
+
     # Output paths
     output_dir: str = "experiments"
     index_path: str = "experiments/index"
@@ -91,6 +104,23 @@ class ColBERTConfig:
     @property
     def ncandidates(self) -> int:
         return self.nprobe * self.ncandidates_factor
+
+    def validate_doc_maxlen(self) -> None:
+        """Ensure doc_maxlen does not exceed the tokenizer's model_max_length.
+
+        Called lazily from sites that already construct the tokenizer (e.g. DocTokenizer)
+        to avoid pulling transformers into config.py at import time.
+        """
+        if self.task != "document" or self.doc_segmentation != "none":
+            return
+        from transformers import AutoTokenizer
+        tok = AutoTokenizer.from_pretrained(self.checkpoint)
+        cap = getattr(tok, "model_max_length", None)
+        if cap and cap < 1_000_000 and self.doc_maxlen > cap:
+            raise ValueError(
+                f"doc_maxlen={self.doc_maxlen} exceeds tokenizer model_max_length={cap} "
+                f"for checkpoint '{self.checkpoint}'. Lower doc_maxlen or pick a longer-context encoder."
+            )
 
     @property
     def resolved_torch_dtype(self) -> torch.dtype:

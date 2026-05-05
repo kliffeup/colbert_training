@@ -85,6 +85,70 @@ python scripts/evaluate.py \
     --index_path experiments/index
 ```
 
+## Document Training (MS MARCO Doc v1)
+
+The same scripts also train and evaluate on full **documents** (longer than passages,
+~3.2M docs in MS MARCO Document v1). Two retrieval-time strategies are supported via
+the `task` and `doc_segmentation` config keys:
+
+| `task` | `doc_segmentation` | Strategy |
+|---|---|---|
+| `passage` | (ignored) | Default passage retrieval (above) |
+| `document` | `none` | End-to-end: each doc encoded as one sequence with `doc_maxlen` up to the encoder's `model_max_length` (512 for BERT, **8192 for ModernBERT**) |
+| `document` | `maxp` | Documents pre-segmented into overlapping passages; index keyed by passage IDs; retrieval aggregates max-per-doc |
+
+### 1. Download MS MARCO Doc v1
+
+```bash
+bash scripts/download_msmarco_docs.sh data/docs
+```
+
+Fetches `msmarco-docs.tsv` (~22 GB compressed), train/dev queries + qrels, BM25 top-100,
+and pre-mined doc-level triples.
+
+### 2. Preprocess
+
+End-to-end (one row per doc, full untruncated text):
+
+```bash
+python scripts/preprocess_msmarco_docs.py \
+    --mode e2e --input data/docs --output data/docs \
+    --format title_body
+```
+
+MaxP (sliding-window passages):
+
+```bash
+python scripts/preprocess_msmarco_docs.py \
+    --mode maxp --input data/docs --output data/docs \
+    --tokenizer bert-base-uncased \
+    --passage-window 180 --passage-stride 90
+```
+
+Field formatting strategies (`--format`): `body_only`, `title_body`, `url_title_body`, `tagged`.
+The `tagged` strategy uses `--field-format-template` (default
+`<title>{title}</title><body>{body}</body>`) which lets long-context models distinguish
+field boundaries.
+
+### 3. Train + Index + Evaluate
+
+The same scripts work — just point at a document config:
+
+```bash
+# End-to-end with BERT (512-token cap)
+torchrun --nproc_per_node=4 scripts/train.py --config configs/document_e2e_bert.yaml --mode triples
+
+# End-to-end with ModernBERT (8192-token cap)
+torchrun --nproc_per_node=4 scripts/train.py --config configs/document_e2e_modernbert.yaml --mode triples
+
+# MaxP with BERT
+torchrun --nproc_per_node=4 scripts/train.py --config configs/document_maxp.yaml --mode triples
+```
+
+Indexing and evaluation use the same scripts; in MaxP mode evaluation transparently
+retrieves K' = `retrieve_top_k * max_passages_per_doc_factor` passages and aggregates
+to the top `retrieve_top_k` documents.
+
 #### BEIR (zero-shot)
 
 ```bash

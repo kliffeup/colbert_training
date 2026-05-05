@@ -1,0 +1,73 @@
+# MS MARCO Document v1 — end-to-end full-document training with bert-base-uncased.
+# Each document is encoded as a single sequence up to BERT's 512-token cap.
+
+# Model
+checkpoint: "google-bert/bert-base-uncased"
+dim: 128
+similarity: "cosine"
+mask_punctuation: true
+attn_implementation: "flash_attention_2"
+torch_dtype: "bfloat16"
+
+# Tokenization
+query_maxlen: 32
+doc_maxlen: 512                 # BERT cap; fixed at the encoder's model_max_length
+
+# Document training
+task: "document"
+doc_segmentation: "none"        # end-to-end; one index entry per doc
+field_format: "title_body"
+field_format_template: "<title>{title}</title><body>{body}</body>"
+
+# Training — Phase 1 (triples)
+bsize: 64                       # smaller than passage bsize=768; long docs are heavier
+accumsteps: 1
+lr: 1.0e-5
+warmup: 1333
+maxsteps: 10000
+
+# Training — Phase 2 (distillation)
+distill_bsize: 8
+distill_lr: 1.0e-5
+distill_warmup: 20000
+distill_maxsteps: 400000
+nway: 32
+cross_encoder: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+top_k_distill: 100
+distill_rounds: 2
+
+# Indexing
+nbits: 2
+kmeans_niters: 4
+
+# Retrieval
+nprobe: 4
+ncandidates_factor: 4096
+retrieve_top_k: 1000
+
+# Data paths — point at MS MARCO Document v1 outputs
+data_dir: "data/docs"
+collection: "data/docs/collection.docs.tsv"
+queries_train: "data/docs/queries.docs.train.tsv"
+queries_dev: "data/docs/queries.docs.dev.tsv"
+qrels_train: "data/docs/qrels.docs.train.tsv"
+qrels_dev: "data/docs/qrels.docs.dev.tsv"
+triples: "data/docs/triples.docs.tsv"
+tuples_dir: "data/docs/tuples"
+documents_dir: "data/docs"
+passage_to_doc_map: "data/docs/passage_to_doc.tsv"   # unused in e2e; harmless
+
+# Output paths
+output_dir: "experiments/docs_e2e_bert"
+index_path: "experiments/docs_e2e_bert/index"
+checkpoint_dir: "experiments/docs_e2e_bert/checkpoints"
+
+# Logging
+log_every: 10
+save_every: 1000
+
+# Wandb
+wandb_enabled: false
+wandb_project: "colbertv2-docs"
+wandb_entity: ""
+wandb_run_name: "e2e_bert"

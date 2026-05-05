@@ -35,13 +35,17 @@ def _encode_batches(
     config: ColBERTConfig,
     doc_maxlen: int | None = None,
     desc: str = "Encoding",
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Shared encoding loop for both full-collection and shard-based encoding."""
+) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    """Shared encoding loop for both full-collection and shard-based encoding.
+
+    Returns pids as a List[str] so that arbitrary string IDs (e.g. MS MARCO
+    Doc "D123456") are preserved end-to-end.
+    """
     maxlen = doc_maxlen or config.doc_maxlen
 
     all_embeddings: List[np.ndarray] = []
     all_doclens: List[int] = []
-    all_pids: List[int] = []
+    all_pids: List[str] = []
 
     amp_dtype = config.resolved_torch_dtype
     with torch.no_grad(), autocast("cuda", dtype=amp_dtype):
@@ -54,12 +58,11 @@ def _encode_batches(
                 embs_i = D[i][mask_i]
                 all_embeddings.append(embs_i.cpu().numpy())
                 all_doclens.append(embs_i.shape[0])
-                all_pids.append(pids[i])
+                all_pids.append(str(pids[i]))
 
     embeddings = np.concatenate(all_embeddings, axis=0).astype(np.float32)
     doclens = np.array(all_doclens, dtype=np.int32)
-    pids = np.array(all_pids, dtype=np.int32)
-    return embeddings, doclens, pids
+    return embeddings, doclens, all_pids
 
 
 # ---------------------------------------------------------------------------
@@ -72,13 +75,13 @@ def encode_collection(
     config: ColBERTConfig,
     batch_size: int = 128,
     doc_maxlen: int | None = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """Encode all passages in the collection (single-process).
 
     Returns:
         all_embeddings: float32 array of shape (total_tokens, dim).
         all_doclens: int32 array of shape (num_docs,) — tokens per doc.
-        all_pids: int32 array of shape (num_docs,) — passage IDs.
+        all_pids: List[str] of length num_docs — passage / document IDs.
     """
     model.eval()
     total_passages = len(collection)
@@ -104,7 +107,7 @@ def encode_collection_shard(
     world_size: int,
     batch_size: int = 128,
     doc_maxlen: int | None = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """Encode this rank's shard of the collection.
 
     Returns:
@@ -139,37 +142,43 @@ def encode_collection_shard(
 def save_shard(
     embeddings: np.ndarray,
     doclens: np.ndarray,
-    pids: np.ndarray,
+    pids: List[str],
     shard_dir: Path,
     rank: int,
 ) -> None:
-    """Persist a GPU worker's encoded shard to disk."""
+    """Persist a GPU worker's encoded shard to disk.
+
+    Pids are saved as a UTF-8 text file (one id per line) so arbitrary string IDs are
+    preserved without needing object-dtype numpy arrays.
+    """
     shard_dir.mkdir(parents=True, exist_ok=True)
     np.save(shard_dir / f"embeddings_{rank}.npy", embeddings)
     np.save(shard_dir / f"doclens_{rank}.npy", doclens)
-    np.save(shard_dir / f"pids_{rank}.npy", pids)
+    with open(shard_dir / f"pids_{rank}.txt", "w", encoding="utf-8") as f:
+        for pid in pids:
+            f.write(f"{pid}\n")
     logger.info(f"[GPU {rank}] Saved shard to {shard_dir}")
 
 
 def load_and_merge_shards(
     shard_dir: Path,
     world_size: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Load all shard files and concatenate, sorted by pid."""
+) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    """Load all shard files and concatenate, sorted by pid (lexicographic for strings)."""
     all_embeddings = []
     all_doclens = []
-    all_pids = []
+    all_pids: List[str] = []
 
     for rank in range(world_size):
         all_embeddings.append(np.load(shard_dir / f"embeddings_{rank}.npy"))
         all_doclens.append(np.load(shard_dir / f"doclens_{rank}.npy"))
-        all_pids.append(np.load(shard_dir / f"pids_{rank}.npy"))
+        with open(shard_dir / f"pids_{rank}.txt", encoding="utf-8") as f:
+            all_pids.extend(line.rstrip("\n") for line in f)
 
-    pids = np.concatenate(all_pids)
     doclens = np.concatenate(all_doclens)
 
-    sort_idx = np.argsort(pids)
-    pids = pids[sort_idx]
+    sort_idx = sorted(range(len(all_pids)), key=lambda i: all_pids[i])
+    pids = [all_pids[i] for i in sort_idx]
     doclens = doclens[sort_idx]
 
     all_embs = np.concatenate(all_embeddings, axis=0)
@@ -251,7 +260,7 @@ def encode_collection_multigpu(
     shard_dir: Path,
     batch_size: int = 128,
     doc_maxlen: int | None = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """Encode the collection in parallel using multiple GPUs.
 
     Saves the model state to a temp file, spawns one worker per GPU
@@ -313,9 +322,11 @@ def sample_embeddings(
 
     logger.info(f"Sampling {n_sample}/{total} passages for centroid estimation")
 
-    pids = collection.pids()
+    pids = list(collection.pids())
     rng = np.random.default_rng(seed=42)
-    sampled_pids = rng.choice(pids, size=n_sample, replace=False)
+    # rng.choice on object dtype returns python strings; cast to list for downstream indexing
+    sampled_idx = rng.choice(len(pids), size=n_sample, replace=False)
+    sampled_pids = [pids[i] for i in sampled_idx]
 
     model.eval()
     all_embeddings: List[np.ndarray] = []
@@ -324,7 +335,7 @@ def sample_embeddings(
     with torch.no_grad(), autocast("cuda", dtype=amp_dtype):
         for i in tqdm(range(0, len(sampled_pids), batch_size), desc="Sampling"):
             batch_pids = sampled_pids[i:i + batch_size]
-            texts = [collection[int(pid)] for pid in batch_pids]
+            texts = [collection[pid] for pid in batch_pids]
 
             D, D_mask = model.encode_docs(texts, maxlen=config.doc_maxlen)
 

@@ -1,14 +1,19 @@
-"""IR evaluation metrics: MRR@k, Recall@k, nDCG@k, Success@k."""
+"""IR evaluation metrics: MRR@k, Recall@k, nDCG@k, Success@k.
+
+Ranking and qrels keys/values are treated generically — int (passages) and str
+(documents like "D123456") both work. Type hints use `Any` for clarity but the
+implementation only relies on equality and hashing.
+"""
 
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Set, Tuple
+from typing import Any, Dict, List, Tuple
 
 
 def mrr_at_k(
-    ranking: Dict[int, List[Tuple[int, float]]],
-    qrels: Dict[int, Dict[int, int]],
+    ranking: Dict[Any, List[Tuple[Any, float]]],
+    qrels: Dict[Any, Dict[Any, int]],
     k: int = 10,
 ) -> float:
     """Mean Reciprocal Rank at k.
@@ -40,8 +45,8 @@ def mrr_at_k(
 
 
 def recall_at_k(
-    ranking: Dict[int, List[Tuple[int, float]]],
-    qrels: Dict[int, Dict[int, int]],
+    ranking: Dict[Any, List[Tuple[Any, float]]],
+    qrels: Dict[Any, Dict[Any, int]],
     k: int = 1000,
 ) -> float:
     """Recall at k.
@@ -74,8 +79,8 @@ def recall_at_k(
 
 
 def success_at_k(
-    ranking: Dict[int, List[Tuple[int, float]]],
-    qrels: Dict[int, Dict[int, int]],
+    ranking: Dict[Any, List[Tuple[Any, float]]],
+    qrels: Dict[Any, Dict[Any, int]],
     k: int = 5,
 ) -> float:
     """Success at k: fraction of queries with at least one relevant doc in top-k.
@@ -111,8 +116,8 @@ def success_at_k(
 
 
 def ndcg_at_k(
-    ranking: Dict[int, List[Tuple[int, float]]],
-    qrels: Dict[int, Dict[int, int]],
+    ranking: Dict[Any, List[Tuple[Any, float]]],
+    qrels: Dict[Any, Dict[Any, int]],
     k: int = 10,
 ) -> float:
     """Normalized Discounted Cumulative Gain at k.
@@ -159,8 +164,8 @@ def ndcg_at_k(
 
 
 def evaluate_ranking(
-    ranking: Dict[int, List[Tuple[int, float]]],
-    qrels: Dict[int, Dict[int, int]],
+    ranking: Dict[Any, List[Tuple[Any, float]]],
+    qrels: Dict[Any, Dict[Any, int]],
 ) -> Dict[str, float]:
     """Compute all standard metrics for a ranking."""
     return {

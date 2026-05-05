@@ -1,0 +1,74 @@
+# MS MARCO Document v1 — end-to-end training with ModernBERT (8192-token context).
+# Demonstrates that the same code path scales from BERT's 512 to ModernBERT's 8192
+# just by swapping the encoder + raising doc_maxlen.
+
+# Model
+checkpoint: "answerdotai/ModernBERT-base"
+dim: 128
+similarity: "cosine"
+mask_punctuation: true
+attn_implementation: "flash_attention_2"
+torch_dtype: "bfloat16"
+
+# Tokenization
+query_maxlen: 32
+doc_maxlen: 8192                # ModernBERT cap
+
+# Document training
+task: "document"
+doc_segmentation: "none"
+field_format: "tagged"
+field_format_template: "<title>{title}</title><body>{body}</body>"
+
+# Training — Phase 1
+bsize: 8                        # 8192-token docs are very heavy; tune to GPU memory
+accumsteps: 8
+lr: 1.0e-5
+warmup: 1333
+maxsteps: 10000
+
+# Training — Phase 2 (distillation)
+distill_bsize: 2
+distill_lr: 1.0e-5
+distill_warmup: 20000
+distill_maxsteps: 400000
+nway: 16
+cross_encoder: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+top_k_distill: 50
+distill_rounds: 2
+
+# Indexing
+nbits: 2
+kmeans_niters: 4
+
+# Retrieval
+nprobe: 4
+ncandidates_factor: 4096
+retrieve_top_k: 1000
+
+# Data paths
+data_dir: "data/docs"
+collection: "data/docs/collection.docs.tsv"
+queries_train: "data/docs/queries.docs.train.tsv"
+queries_dev: "data/docs/queries.docs.dev.tsv"
+qrels_train: "data/docs/qrels.docs.train.tsv"
+qrels_dev: "data/docs/qrels.docs.dev.tsv"
+triples: "data/docs/triples.docs.tsv"
+tuples_dir: "data/docs/tuples"
+documents_dir: "data/docs"
+passage_to_doc_map: "data/docs/passage_to_doc.tsv"
+
+# Output paths
+output_dir: "experiments/docs_e2e_modernbert"
+index_path: "experiments/docs_e2e_modernbert/index"
+checkpoint_dir: "experiments/docs_e2e_modernbert/checkpoints"
+
+# Logging
+log_every: 10
+save_every: 1000
+
+# Wandb
+wandb_enabled: false
+wandb_project: "colbertv2-docs"
+wandb_entity: ""
+wandb_run_name: "e2e_modernbert_8192"

@@ -1,0 +1,78 @@
+# MS MARCO Document v1 — MaxP-style training:
+# documents are pre-segmented (offline, by scripts/preprocess_msmarco_docs.py --mode maxp)
+# into overlapping passages; the index is keyed by passage_id; at retrieval time we
+# aggregate passage scores back to docids (max per doc).
+
+# Model
+checkpoint: "google-bert/bert-base-uncased"
+dim: 128
+similarity: "cosine"
+mask_punctuation: true
+attn_implementation: "flash_attention_2"
+torch_dtype: "bfloat16"
+
+# Tokenization
+query_maxlen: 32
+doc_maxlen: 180                 # passage-sized; aligns with passage_window
+
+# Document training
+task: "document"
+doc_segmentation: "maxp"
+passage_window: 180
+passage_stride: 90
+max_passages_per_doc_factor: 4  # K' = retrieve_top_k * factor at retrieval time
+field_format: "title_body"
+field_format_template: "<title>{title}</title><body>{body}</body>"
+
+# Training — Phase 1 (passage-level; existing code path)
+bsize: 256
+accumsteps: 1
+lr: 1.0e-5
+warmup: 1333
+maxsteps: 10000
+
+# Training — Phase 2 (distillation)
+distill_bsize: 32
+distill_lr: 1.0e-5
+distill_warmup: 20000
+distill_maxsteps: 400000
+nway: 64
+cross_encoder: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+top_k_distill: 500
+distill_rounds: 2
+
+# Indexing
+nbits: 2
+kmeans_niters: 4
+
+# Retrieval
+nprobe: 2
+ncandidates_factor: 4096
+retrieve_top_k: 1000
+
+# Data paths — point at the maxp preprocess output
+data_dir: "data/docs"
+collection: "data/docs/collection.passages.tsv"
+queries_train: "data/docs/queries.docs.train.tsv"
+queries_dev: "data/docs/queries.docs.dev.tsv"
+qrels_train: "data/docs/qrels.docs.train.tsv"
+qrels_dev: "data/docs/qrels.docs.dev.tsv"
+triples: "data/docs/triples.passages.tsv"
+tuples_dir: "data/docs/tuples_maxp"
+documents_dir: "data/docs"
+passage_to_doc_map: "data/docs/passage_to_doc.tsv"
+
+# Output paths
+output_dir: "experiments/docs_maxp"
+index_path: "experiments/docs_maxp/index"
+checkpoint_dir: "experiments/docs_maxp/checkpoints"
+
+# Logging
+log_every: 10
+save_every: 1000
+
+# Wandb
+wandb_enabled: false
+wandb_project: "colbertv2-docs"
+wandb_entity: ""
+wandb_run_name: "maxp_bert_180_90"

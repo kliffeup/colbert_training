@@ -22,6 +22,7 @@ from colbert.data.queries import Queries
 from colbert.data.ranking import load_qrels, save_ranking
 from colbert.evaluation.retriever import ColBERTRetriever
 from colbert.evaluation.metrics import evaluate_ranking
+from colbert.evaluation.doc_evaluator import retrieve_documents
 from colbert.training.utils import load_checkpoint
 
 
@@ -54,7 +55,14 @@ def main():
     qid_list = [qid for qid, _ in query_list]
     query_texts = [text for _, text in query_list]
 
-    raw_results = retriever.retrieve(query_texts, top_k=config.retrieve_top_k)
+    is_maxp = config.task == "document" and config.doc_segmentation == "maxp"
+    if is_maxp:
+        logger.info(
+            "Document MaxP evaluation: retrieving passages and aggregating to docs."
+        )
+        raw_results = retrieve_documents(retriever, query_texts, config)
+    else:
+        raw_results = retriever.retrieve(query_texts, top_k=config.retrieve_top_k)
 
     ranking = {
         qid_list[q_idx]: raw_results[q_idx]
@@ -63,7 +71,8 @@ def main():
 
     metrics = evaluate_ranking(ranking, qrels)
 
-    logger.info("\nMS MARCO Dev Results:")
+    label = "MS MARCO Doc" if config.task == "document" else "MS MARCO"
+    logger.info(f"\n{label} Dev Results:")
     for metric, value in metrics.items():
         logger.info(f"  {metric}: {value:.4f}")
 
