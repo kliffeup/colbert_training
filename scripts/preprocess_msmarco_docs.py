@@ -103,6 +103,143 @@ def _copy_queries(src: Path, dst: Path) -> None:
     logger.info(f"Wrote queries: {dst}")
 
 
+def _load_train_queries(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    out: dict[str, str] = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            parts = line.split("\t", 1)
+            if len(parts) != 2:
+                continue
+            qid, text = parts
+            out[qid] = text
+    return out
+
+
+def _load_train_positives(path: Path) -> dict[str, set[str]]:
+    """Read TREC-format qrels (`qid 0 docid rel`, whitespace-separated) -> {qid: {docids}}."""
+    if not path.exists():
+        return {}
+    out: dict[str, set[str]] = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            qid, _, docid, rel = parts[0], parts[1], parts[2], parts[3]
+            try:
+                rel_i = int(rel)
+            except ValueError:
+                continue
+            if rel_i <= 0:
+                continue
+            out.setdefault(qid, set()).add(docid)
+    return out
+
+
+def _iter_top100(path: Path):
+    """Yield (qid, docid) in BM25-rank order from a TREC run file.
+
+    Format: `qid Q0 docid rank score runname` (whitespace-separated).
+    """
+    if not path.exists():
+        return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            qid, _, docid = parts[0], parts[1], parts[2]
+            yield qid, docid
+
+
+def build_triples(
+    input_dir: Path,
+    output_path: Path,
+    negatives_per_positive: int,
+    seed: int,
+    docid_remap: dict[str, str] | None = None,
+) -> None:
+    """Mine ``query<TAB>pos<TAB>neg`` triples from BM25 top-100 + qrels.
+
+    Args:
+        input_dir: Directory containing ``msmarco-doctrain-{queries,qrels}.tsv`` and
+            ``msmarco-doctrain-top100``.
+        output_path: TSV target.
+        negatives_per_positive: Number of negatives sampled per (query, positive) pair.
+        seed: RNG seed for reproducible sampling.
+        docid_remap: Optional ``docid -> id`` mapping to apply to both pos and neg before
+            writing (e.g. doc -> first-passage id for maxp mode). Triples whose pos or neg
+            cannot be mapped are dropped.
+    """
+    import random
+
+    qrels_path = input_dir / "msmarco-doctrain-qrels.tsv"
+    queries_path = input_dir / "msmarco-doctrain-queries.tsv"
+    top100_path = input_dir / "msmarco-doctrain-top100"
+
+    positives = _load_train_positives(qrels_path)
+    queries = _load_train_queries(queries_path)
+    if not positives or not queries or not top100_path.exists():
+        logger.warning(
+            f"Cannot mine triples — missing one of "
+            f"qrels={qrels_path.exists()} / queries={queries_path.exists()} / "
+            f"top100={top100_path.exists()}. Skipping."
+        )
+        return
+
+    logger.info(
+        f"Mining triples from {top100_path.name} + qrels "
+        f"({len(positives):,} queries with positives, {negatives_per_positive} neg/pos, seed={seed})"
+    )
+
+    # Group top-100 candidates by qid (preserving rank order). Streams once.
+    qid_to_candidates: dict[str, list[str]] = {}
+    for qid, docid in _iter_top100(top100_path):
+        qid_to_candidates.setdefault(qid, []).append(docid)
+
+    rng = random.Random(seed)
+    n_triples = 0
+    n_no_candidates = 0
+    n_remap_dropped = 0
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, "w", encoding="utf-8") as fout:
+        for qid, pos_docids in positives.items():
+            query_text = queries.get(qid)
+            if query_text is None:
+                continue
+            candidates = qid_to_candidates.get(qid, [])
+            negative_pool = [d for d in candidates if d not in pos_docids]
+            if not negative_pool:
+                n_no_candidates += 1
+                continue
+            for pos_docid in pos_docids:
+                k = min(negatives_per_positive, len(negative_pool))
+                negs = rng.sample(negative_pool, k)
+                for neg_docid in negs:
+                    if docid_remap is not None:
+                        pos_id = docid_remap.get(pos_docid)
+                        neg_id = docid_remap.get(neg_docid)
+                        if pos_id is None or neg_id is None:
+                            n_remap_dropped += 1
+                            continue
+                    else:
+                        pos_id, neg_id = pos_docid, neg_docid
+                    fout.write(f"{query_text}\t{pos_id}\t{neg_id}\n")
+                    n_triples += 1
+
+    logger.info(
+        f"Wrote {n_triples:,} triples to {output_path}"
+        + (f" ({n_no_candidates:,} queries had no negative candidates)" if n_no_candidates else "")
+        + (f" ({n_remap_dropped:,} dropped due to missing remap)" if n_remap_dropped else "")
+    )
+
+
 # ---------------------------------------------------------------------------
 # Mode: e2e
 # ---------------------------------------------------------------------------
@@ -112,6 +249,8 @@ def run_e2e(
     output_dir: Path,
     field_format: str,
     field_format_template: str,
+    negatives_per_positive: int,
+    seed: int,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     out_collection = output_dir / "collection.docs.tsv"
@@ -140,12 +279,13 @@ def run_e2e(
         output_dir / "queries.docs.dev.tsv",
     )
 
-    # Triples are kept doc-level in e2e mode (they reference docids directly)
-    src_triples = input_dir / "msmarco-doctriples.tsv"
-    dst_triples = output_dir / "triples.docs.tsv"
-    if src_triples.exists() and src_triples.resolve() != dst_triples.resolve():
-        dst_triples.write_bytes(src_triples.read_bytes())
-        logger.info(f"Copied triples: {dst_triples}")
+    # MS MARCO Doc v1 does not ship pre-mined triples; build them from BM25 top-100 + qrels.
+    build_triples(
+        input_dir=input_dir,
+        output_path=output_dir / "triples.docs.tsv",
+        negatives_per_positive=negatives_per_positive,
+        seed=seed,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +300,8 @@ def run_maxp(
     tokenizer_name: str,
     window: int,
     stride: int,
+    negatives_per_positive: int,
+    seed: int,
 ) -> None:
     from transformers import AutoTokenizer
 
@@ -215,38 +357,13 @@ def run_maxp(
         output_dir / "queries.docs.dev.tsv",
     )
 
-    # Convert doc-level triples (qid<TAB>pos_docid<TAB>neg_docid or query<TAB>pos<TAB>neg)
-    # to passage-level by mapping each docid to its first passage.
-    src_triples = input_dir / "msmarco-doctriples.tsv"
-    dst_triples = output_dir / "triples.passages.tsv"
-    if not src_triples.exists():
-        logger.warning(f"{src_triples} missing — skipping triples conversion")
-        return
-
-    n_kept = 0
-    n_skipped = 0
-    with open(src_triples, encoding="utf-8") as fin, open(dst_triples, "w", encoding="utf-8") as fout:
-        for line in fin:
-            line = line.rstrip("\n")
-            if not line:
-                continue
-            parts = line.split("\t")
-            if len(parts) < 3:
-                n_skipped += 1
-                continue
-            # MS MARCO doctriples format: query<TAB>pos_docid<TAB>neg_docid
-            # (text-form triples; use the docids from columns 1 and 2)
-            query_or_qid, pos_docid, neg_docid = parts[0], parts[1], parts[2]
-            pos_pid = doc_first_passage.get(pos_docid)
-            neg_pid = doc_first_passage.get(neg_docid)
-            if pos_pid is None or neg_pid is None:
-                n_skipped += 1
-                continue
-            fout.write(f"{query_or_qid}\t{pos_pid}\t{neg_pid}\n")
-            n_kept += 1
-    logger.info(
-        f"Converted triples: {n_kept:,} kept, {n_skipped:,} skipped (unknown docid). "
-        f"Output: {dst_triples}"
+    # Mine triples from BM25 top-100 + qrels and remap docids to their first passage.
+    build_triples(
+        input_dir=input_dir,
+        output_path=output_dir / "triples.passages.tsv",
+        negatives_per_positive=negatives_per_positive,
+        seed=seed,
+        docid_remap=doc_first_passage,
     )
 
 
@@ -279,6 +396,17 @@ def main() -> None:
     )
     p.add_argument("--passage-window", type=int, default=180)
     p.add_argument("--passage-stride", type=int, default=90)
+    p.add_argument(
+        "--negatives-per-positive",
+        type=int,
+        default=4,
+        help="Number of BM25-top100 negatives sampled per (query, positive) pair when "
+             "mining Phase 1 triples.",
+    )
+    p.add_argument(
+        "--seed", type=int, default=12345,
+        help="RNG seed for reproducible negative sampling.",
+    )
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args()
 
@@ -290,6 +418,8 @@ def main() -> None:
             output_dir=args.output,
             field_format=args.field_format,
             field_format_template=args.field_format_template,
+            negatives_per_positive=args.negatives_per_positive,
+            seed=args.seed,
         )
     else:
         run_maxp(
@@ -300,6 +430,8 @@ def main() -> None:
             tokenizer_name=args.tokenizer,
             window=args.passage_window,
             stride=args.passage_stride,
+            negatives_per_positive=args.negatives_per_positive,
+            seed=args.seed,
         )
 
 

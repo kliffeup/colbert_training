@@ -103,8 +103,11 @@ the `task` and `doc_segmentation` config keys:
 bash scripts/download_msmarco_docs.sh data/docs
 ```
 
-Fetches `msmarco-docs.tsv` (~22 GB compressed), train/dev queries + qrels, BM25 top-100,
-and pre-mined doc-level triples.
+Fetches `msmarco-docs.tsv` (~22 GB compressed), train/dev queries + qrels, and the
+BM25 top-100 candidates per training query. Per-file fetches are isolated, so a single
+404/timeout won't abort the rest. **No pre-mined triples are downloaded** — Microsoft
+doesn't ship them for the document task; the preprocess step mines triples from
+`msmarco-doctrain-top100` + `msmarco-doctrain-qrels.tsv`.
 
 ### 2. Preprocess
 
@@ -124,6 +127,10 @@ python scripts/preprocess_msmarco_docs.py \
     --tokenizer bert-base-uncased \
     --passage-window 180 --passage-stride 90
 ```
+
+Both modes also mine Phase 1 training triples (`triples.docs.tsv` for e2e or
+`triples.passages.tsv` for maxp) by sampling negatives from `msmarco-doctrain-top100`.
+Tunable via `--negatives-per-positive` (default 4) and `--seed`.
 
 Field formatting strategies (`--format`): `body_only`, `title_body`, `url_title_body`, `tagged`.
 The `tagged` strategy uses `--field-format-template` (default

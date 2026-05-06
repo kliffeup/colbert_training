@@ -6,13 +6,18 @@
 #   msmarco-docs.tsv.gz             (corpus: docid \t url \t title \t body)
 #   msmarco-doctrain-queries.tsv.gz
 #   msmarco-doctrain-qrels.tsv.gz   (TREC format: qid 0 docid 1)
-#   msmarco-doctrain-top100.gz      (BM25 top-100 per training query, optional)
-#   msmarco-doctriples.tsv.gz       (BM25-mined triples for Phase 1)
+#   msmarco-doctrain-top100.gz      (BM25 top-100 per training query)
 #   msmarco-docdev-queries.tsv.gz
 #   msmarco-docdev-qrels.tsv.gz
 #
+# NOTE: there is no pre-built `msmarco-doctriples.tsv` in the official distribution;
+# Microsoft only ships triples for the passage task. Phase 1 triples are mined from
+# top100 + qrels by `scripts/preprocess_msmarco_docs.py`.
+#
+# Per-file fetches are isolated so a single 404 does not abort the rest of the run.
+#
 # Usage:  bash scripts/download_msmarco_docs.sh [data_dir] [aria2c_connections]
-set -euo pipefail
+set -uo pipefail
 
 DATA_DIR="${1:-data/docs}"
 CONNECTIONS="${2:-8}"
@@ -32,62 +37,74 @@ fi
 download() {
     local url="$1"
     local dest="$2"
-    if [ -f "$dest" ]; then
+    if [ -f "$dest" ] && [ -s "$dest" ]; then
         echo "Already exists: $dest"
-        return
+        return 0
     fi
+    # Drop any zero-byte placeholder from a previously-failed run so the downloader
+    # treats this as a fresh attempt.
+    [ -f "$dest" ] && [ ! -s "$dest" ] && rm -f "$dest"
     echo "Downloading: $url -> $dest"
+    local rc=0
     if [ "$DOWNLOADER" = "aria2c" ]; then
         aria2c -x "$CONNECTIONS" -s "$CONNECTIONS" -k 1M \
             --dir="$(dirname "$dest")" --out="$(basename "$dest")" \
             --console-log-level=warn --summary-interval=5 \
-            "$url"
+            "$url" || rc=$?
     else
-        wget -q --show-progress -O "$dest" "$url"
+        wget -q --show-progress -O "$dest" "$url" || rc=$?
+    fi
+    if [ "$rc" -ne 0 ]; then
+        echo "WARNING: download failed for $url (exit $rc) — continuing." >&2
+        # Remove zero-byte file the failed downloader may have left behind.
+        [ -f "$dest" ] && [ ! -s "$dest" ] && rm -f "$dest"
+        return "$rc"
+    fi
+}
+
+# Each fetch_and_unpack handles its own errors so a single 404 / network blip does not
+# abort the rest of the script.
+fetch_and_unpack() {
+    local url="$1"
+    local gz_dest="$2"
+    local final="$3"
+    if [ -f "$final" ] && [ -s "$final" ]; then
+        echo "Already exists: $final"
+        return 0
+    fi
+    if ! download "$url" "$gz_dest"; then
+        return 0  # warning already printed by download()
+    fi
+    if ! gunzip -k "$gz_dest"; then
+        echo "WARNING: gunzip failed for $gz_dest — file may be corrupt." >&2
+        rm -f "$gz_dest"
     fi
 }
 
 # 1. Document corpus (largest file: ~22 GB compressed)
-if [ ! -f "$DATA_DIR/msmarco-docs.tsv" ]; then
-    download "$BASE_URL/msmarco-docs.tsv.gz" "$DATA_DIR/msmarco-docs.tsv.gz"
-    echo "Decompressing msmarco-docs.tsv.gz ..."
-    gunzip -k "$DATA_DIR/msmarco-docs.tsv.gz"
-fi
+fetch_and_unpack "$BASE_URL/msmarco-docs.tsv.gz" \
+    "$DATA_DIR/msmarco-docs.tsv.gz" "$DATA_DIR/msmarco-docs.tsv"
 
 # 2. Train queries
-if [ ! -f "$DATA_DIR/msmarco-doctrain-queries.tsv" ]; then
-    download "$BASE_URL/msmarco-doctrain-queries.tsv.gz" "$DATA_DIR/msmarco-doctrain-queries.tsv.gz"
-    gunzip -k "$DATA_DIR/msmarco-doctrain-queries.tsv.gz"
-fi
+fetch_and_unpack "$BASE_URL/msmarco-doctrain-queries.tsv.gz" \
+    "$DATA_DIR/msmarco-doctrain-queries.tsv.gz" "$DATA_DIR/msmarco-doctrain-queries.tsv"
 
 # 3. Train qrels (TREC format: qid 0 docid 1)
-if [ ! -f "$DATA_DIR/msmarco-doctrain-qrels.tsv" ]; then
-    download "$BASE_URL/msmarco-doctrain-qrels.tsv.gz" "$DATA_DIR/msmarco-doctrain-qrels.tsv.gz"
-    gunzip -k "$DATA_DIR/msmarco-doctrain-qrels.tsv.gz"
-fi
+fetch_and_unpack "$BASE_URL/msmarco-doctrain-qrels.tsv.gz" \
+    "$DATA_DIR/msmarco-doctrain-qrels.tsv.gz" "$DATA_DIR/msmarco-doctrain-qrels.tsv"
 
-# 4. Train BM25 top-100 candidates (optional, used for distillation hard negatives)
-if [ ! -f "$DATA_DIR/msmarco-doctrain-top100" ]; then
-    download "$BASE_URL/msmarco-doctrain-top100.gz" "$DATA_DIR/msmarco-doctrain-top100.gz"
-    gunzip -k "$DATA_DIR/msmarco-doctrain-top100.gz"
-fi
+# 4. Train BM25 top-100 candidates — used by preprocess to mine Phase 1 triples and
+#    by Phase 2 distillation as the hard-negative pool.
+fetch_and_unpack "$BASE_URL/msmarco-doctrain-top100.gz" \
+    "$DATA_DIR/msmarco-doctrain-top100.gz" "$DATA_DIR/msmarco-doctrain-top100"
 
-# 5. Pre-mined doc-level triples for Phase 1
-if [ ! -f "$DATA_DIR/msmarco-doctriples.tsv" ]; then
-    download "$BASE_URL/msmarco-doctriples.tsv.gz" "$DATA_DIR/msmarco-doctriples.tsv.gz"
-    gunzip -k "$DATA_DIR/msmarco-doctriples.tsv.gz"
-fi
-
-# 6. Dev queries + qrels
-if [ ! -f "$DATA_DIR/msmarco-docdev-queries.tsv" ]; then
-    download "$BASE_URL/msmarco-docdev-queries.tsv.gz" "$DATA_DIR/msmarco-docdev-queries.tsv.gz"
-    gunzip -k "$DATA_DIR/msmarco-docdev-queries.tsv.gz"
-fi
-if [ ! -f "$DATA_DIR/msmarco-docdev-qrels.tsv" ]; then
-    download "$BASE_URL/msmarco-docdev-qrels.tsv.gz" "$DATA_DIR/msmarco-docdev-qrels.tsv.gz"
-    gunzip -k "$DATA_DIR/msmarco-docdev-qrels.tsv.gz"
-fi
+# 5. Dev queries + qrels
+fetch_and_unpack "$BASE_URL/msmarco-docdev-queries.tsv.gz" \
+    "$DATA_DIR/msmarco-docdev-queries.tsv.gz" "$DATA_DIR/msmarco-docdev-queries.tsv"
+fetch_and_unpack "$BASE_URL/msmarco-docdev-qrels.tsv.gz" \
+    "$DATA_DIR/msmarco-docdev-qrels.tsv.gz" "$DATA_DIR/msmarco-docdev-qrels.tsv"
 
 echo
-echo "MS MARCO Document v1 ready in $DATA_DIR"
-echo "Next: run scripts/preprocess_msmarco_docs.py to build the collection / passages."
+echo "MS MARCO Document v1 raw files ready in $DATA_DIR"
+echo "Next: run scripts/preprocess_msmarco_docs.py — it will also mine Phase 1 triples"
+echo "      from msmarco-doctrain-top100 + msmarco-doctrain-qrels.tsv."
