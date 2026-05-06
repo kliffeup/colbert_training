@@ -11,7 +11,7 @@ from transformers import AutoModel
 logger = logging.getLogger(__name__)
 
 from colbert.config import ColBERTConfig
-from colbert.modeling.tokenization import QueryTokenizer, DocTokenizer
+from colbert.modeling.tokenization import QueryTokenizer, DocTokenizer, setup_tokenizer
 from colbert.modeling.similarity import colbert_score
 
 
@@ -49,15 +49,20 @@ class ColBERT(nn.Module):
 
         self.linear = nn.Linear(self.bert.config.hidden_size, config.dim, bias=False)
 
-        self.query_tokenizer = QueryTokenizer(config)
-        self.doc_tokenizer = DocTokenizer(config)
+        # One tokenizer instance shared between query and doc sides so [Q]/[D]/field
+        # markers are consistent in ID space.
+        setup = setup_tokenizer(config)
+        self.query_tokenizer = QueryTokenizer(config, setup=setup)
+        self.doc_tokenizer = DocTokenizer(config, setup=setup)
 
-        # If the tokenizer had to add new special tokens for [Q]/[D] markers (e.g. on
-        # encoders without [unused0]/[unused1] slots), grow the embedding matrix to match.
-        added = self.query_tokenizer.num_added_tokens
-        if added > 0:
-            self.bert.resize_token_embeddings(len(self.query_tokenizer.tok))
-            logger.info(f"Resized encoder embeddings to fit {added} new marker token(s).")
+        # If [Q]/[D] or field-marker tokens were added to the vocab (encoders without
+        # [unused0]/[unused1] slots, or any field_markers), grow the embedding matrix.
+        if setup.num_added_tokens > 0:
+            self.bert.resize_token_embeddings(len(setup.tokenizer))
+            logger.info(
+                f"Resized encoder embeddings to fit {setup.num_added_tokens} new "
+                f"special token(s) ([Q]/[D] markers + field markers)."
+            )
 
     def forward(
         self,
@@ -83,12 +88,24 @@ class ColBERT(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Encode documents. Returns embeddings and a mask for valid (non-pad, non-punct) tokens."""
+        """Encode documents. Returns embeddings and a mask for valid (non-pad, non-punct,
+        in-indexed-field) tokens.
+
+        The mask combines:
+          * attention_mask (drops padding)
+          * punctuation_mask (drops punctuation when config.mask_punctuation)
+          * indexed_token_mask (drops tokens outside config.indexed_fields when set)
+
+        The encoder still sees the full sequence, so kept tokens remain context-aware
+        of the masked-out body / fields. Masked positions are post-encoder hard-zeroed,
+        so they contribute nothing to MaxSim, in-batch CE, or the index.
+        """
         D = self.forward(input_ids, attention_mask)
         doc_mask = self.doc_tokenizer.punctuation_mask(input_ids).to(D.device)
         doc_mask = doc_mask & attention_mask.bool()
+        doc_mask = doc_mask & self.doc_tokenizer.indexed_token_mask(input_ids).to(D.device)
 
-        # Zero out punctuation/padding embeddings
+        # Zero out punctuation/padding/out-of-field embeddings
         D = D * doc_mask.unsqueeze(2).float()
         return D, doc_mask
 

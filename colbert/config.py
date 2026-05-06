@@ -40,6 +40,20 @@ class ColBERTConfig:
     field_format: str = "title_body"         # "body_only" | "title_body" | "url_title_body" | "tagged"
     field_format_template: str = "<title>{title}</title><body>{body}</body>"
 
+    # Field-level masking
+    # Map from field name -> [begin_marker, end_marker]. Each marker is registered as an
+    # additional special token so it tokenizes to exactly one ID and never merges with
+    # adjacent text. Example:
+    #   {"title": ["[TITLE_BEGIN]", "[TITLE_END]"], "body": ["[BODY_BEGIN]", "[BODY_END]"]}
+    field_markers: dict = field(default_factory=dict)
+    # Fields whose token positions should be kept in the doc embeddings. Empty -> no
+    # field-based filtering (all non-pad, non-punct tokens contribute, current behavior).
+    indexed_fields: list = field(default_factory=list)
+    # Whether the marker tokens themselves (begin/end) count as kept positions.
+    index_field_markers: bool = False
+    # Whether [CLS] / [SEP] / [D] are kept regardless of field membership. Recommended True.
+    index_special_tokens: bool = True
+
     # Training — Phase 1 (triples)
     bsize: int = 32
     accumsteps: int = 1

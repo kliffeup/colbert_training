@@ -149,6 +149,36 @@ Indexing and evaluation use the same scripts; in MaxP mode evaluation transparen
 retrieves K' = `retrieve_top_k * max_passages_per_doc_factor` passages and aggregates
 to the top `retrieve_top_k` documents.
 
+### Field-level masking ("encode whole, score part")
+
+Useful when you want the encoder to *see* the full document (so the indexed positions
+are context-aware) but only some fields to *contribute* to MaxSim scoring and the index.
+For example, encode `<title>...</title><body>...</body>` end-to-end but score on title
+only.
+
+The mechanism: register sentinel tokens (e.g. `[TITLE_BEGIN]`/`[TITLE_END]`) as additional
+special tokens so each is a single atomic token id, then mask out everything outside the
+declared indexed fields after the encoder. Body positions get hard-zeroed before MaxSim,
+so they contribute nothing to score / loss / index — but they still influence title
+embeddings via self-attention.
+
+In `configs/document_e2e_modernbert.yaml`:
+
+```yaml
+field_format: "tagged"
+field_format_template: "[TITLE_BEGIN]{title}[TITLE_END][BODY_BEGIN]{body}[BODY_END]"
+field_markers:
+  title: ["[TITLE_BEGIN]", "[TITLE_END]"]
+  body:  ["[BODY_BEGIN]",  "[BODY_END]"]
+indexed_fields: ["title"]      # only title content scores
+index_field_markers: false     # drop the markers themselves from the index
+index_special_tokens: true     # keep [CLS]/[SEP]/[D] regardless
+```
+
+The same mask flows through training, indexing, and retrieval — masked positions are
+zeroed post-encoder ([colbert/modeling/colbert.py:80](colbert/modeling/colbert.py#L80)),
+so MaxSim, in-batch CE, and KL-distillation losses all only see the indexed fields.
+
 #### BEIR (zero-shot)
 
 ```bash

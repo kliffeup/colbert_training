@@ -18,7 +18,16 @@ doc_maxlen: 8192                # ModernBERT cap
 task: "document"
 doc_segmentation: "none"
 field_format: "tagged"
-field_format_template: "<title>{title}</title><body>{body}</body>"
+field_format_template: "[TITLE_BEGIN]{title}[TITLE_END][BODY_BEGIN]{body}[BODY_END]"
+
+# Field-level masking — encode the WHOLE doc (so title is body-aware), but only let
+# title-content positions contribute to MaxSim / loss / index.
+field_markers:
+  title: ["[TITLE_BEGIN]", "[TITLE_END]"]
+  body:  ["[BODY_BEGIN]",  "[BODY_END]"]
+indexed_fields: ["title"]      # only title content counts; body is contextualized but unscored
+index_field_markers: false     # drop the begin/end markers themselves
+index_special_tokens: true     # keep [CLS]/[SEP]/[D] for the doc-level signal
 
 # Training — Phase 1
 bsize: 8                        # 8192-token docs are very heavy; tune to GPU memory

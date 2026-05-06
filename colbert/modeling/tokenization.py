@@ -1,20 +1,20 @@
 from __future__ import annotations
 
 import string
-from typing import List, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
 import torch
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from colbert.config import ColBERTConfig
 
 
-def _resolve_marker(tok, fallback_token: str, fallback_marker: str) -> Tuple[int, int]:
-    """Return (marker_token_id, num_tokens_added).
+def _resolve_marker(tok: PreTrainedTokenizerBase, fallback_token: str, fallback_marker: str) -> Tuple[int, int]:
+    """Return ``(marker_token_id, num_tokens_added)``.
 
-    Prefers an unused-vocab slot (e.g. `[unused0]` in BERT) when available; otherwise adds
-    the fallback as a new special token. Returns the marker id and the number of *new*
-    tokens added to the tokenizer (0 when the fallback existed).
+    Prefers an unused-vocab slot (e.g. ``[unused0]`` in BERT) when available; otherwise
+    adds the fallback as a new special token.
     """
     fb_id = tok.convert_tokens_to_ids(fallback_token)
     unk = tok.unk_token_id
@@ -25,42 +25,66 @@ def _resolve_marker(tok, fallback_token: str, fallback_marker: str) -> Tuple[int
     return tok.convert_tokens_to_ids(fallback_marker), added
 
 
-class _SharedTokenizerState:
-    """Lazily-built tokenizer + marker IDs shared between QueryTokenizer and DocTokenizer.
+@dataclass
+class TokenizerSetup:
+    """Result of registering [Q] / [D] / field-marker tokens on a tokenizer."""
+    tokenizer: PreTrainedTokenizerBase
+    Q_marker_id: int
+    D_marker_id: int
+    field_marker_ids: Dict[str, Tuple[int, int]] = field(default_factory=dict)
+    num_added_tokens: int = 0
 
-    Markers are resolved once per (checkpoint) so query/doc tokenizers agree on IDs even if
-    we had to add tokens (which mutates the tokenizer state).
+
+def setup_tokenizer(config: ColBERTConfig) -> TokenizerSetup:
+    """Build a fresh tokenizer for ``config.checkpoint`` and register all required markers.
+
+    Single source of truth for [Q]/[D] markers and field-boundary markers — both Query
+    and Doc tokenizers share the resulting tokenizer instance so token IDs stay aligned
+    and the encoder only needs to be resized once.
     """
+    tok = AutoTokenizer.from_pretrained(config.checkpoint)
 
-    _cache: dict = {}
+    Q_id, q_added = _resolve_marker(tok, "[unused0]", "[Q]")
+    D_id, d_added = _resolve_marker(tok, "[unused1]", "[D]")
 
-    @classmethod
-    def get(cls, checkpoint: str):
-        if checkpoint in cls._cache:
-            return cls._cache[checkpoint]
+    field_marker_ids: Dict[str, Tuple[int, int]] = {}
+    field_added = 0
+    if config.field_markers:
+        flat: List[str] = []
+        for fname, markers in config.field_markers.items():
+            if not isinstance(markers, (list, tuple)) or len(markers) != 2:
+                raise ValueError(
+                    f"field_markers['{fname}'] must be [begin, end]; got {markers!r}"
+                )
+            flat.extend(markers)
+        if len(set(flat)) != len(flat):
+            raise ValueError(f"field_markers contains duplicate marker strings: {flat}")
+        field_added = tok.add_special_tokens({"additional_special_tokens": flat})
+        for fname, (begin, end) in config.field_markers.items():
+            field_marker_ids[fname] = (
+                tok.convert_tokens_to_ids(begin),
+                tok.convert_tokens_to_ids(end),
+            )
 
-        tok = AutoTokenizer.from_pretrained(checkpoint)
-        q_id, q_added = _resolve_marker(tok, "[unused0]", "[Q]")
-        d_id, d_added = _resolve_marker(tok, "[unused1]", "[D]")
-        state = {
-            "tokenizer": tok,
-            "Q_marker_token_id": q_id,
-            "D_marker_token_id": d_id,
-            "num_added_tokens": q_added + d_added,
-        }
-        cls._cache[checkpoint] = state
-        return state
+    return TokenizerSetup(
+        tokenizer=tok,
+        Q_marker_id=Q_id,
+        D_marker_id=D_id,
+        field_marker_ids=field_marker_ids,
+        num_added_tokens=q_added + d_added + field_added,
+    )
 
 
 class QueryTokenizer:
     """Tokenizes queries with [Q] marker and [MASK] padding to fixed length."""
 
-    def __init__(self, config: ColBERTConfig):
+    def __init__(self, config: ColBERTConfig, setup: TokenizerSetup | None = None):
         self.config = config
-        state = _SharedTokenizerState.get(config.checkpoint)
-        self.tok = state["tokenizer"]
-        self.Q_marker_token_id = state["Q_marker_token_id"]
-        self.num_added_tokens = state["num_added_tokens"]
+        if setup is None:
+            setup = setup_tokenizer(config)
+        self.tok = setup.tokenizer
+        self.Q_marker_token_id = setup.Q_marker_id
+        self.num_added_tokens = setup.num_added_tokens
         self.mask_token_id = self.tok.mask_token_id
         self.cls_token_id = self.tok.cls_token_id
         self.sep_token_id = self.tok.sep_token_id
@@ -105,26 +129,43 @@ class QueryTokenizer:
 
 
 class DocTokenizer:
-    """Tokenizes documents with [D] marker and optional punctuation masking."""
+    """Tokenizes documents with [D] marker, optional punctuation masking, and optional
+    field-level masking via configured begin/end marker tokens."""
 
-    def __init__(self, config: ColBERTConfig):
+    def __init__(self, config: ColBERTConfig, setup: TokenizerSetup | None = None):
         self.config = config
-        state = _SharedTokenizerState.get(config.checkpoint)
-        self.tok = state["tokenizer"]
-        self.D_marker_token_id = state["D_marker_token_id"]
-        self.num_added_tokens = state["num_added_tokens"]
+        if setup is None:
+            setup = setup_tokenizer(config)
+        self.tok = setup.tokenizer
+        self.D_marker_token_id = setup.D_marker_id
+        self.num_added_tokens = setup.num_added_tokens
+        self.field_marker_ids: Dict[str, Tuple[int, int]] = setup.field_marker_ids
         self.cls_token_id = self.tok.cls_token_id
         self.sep_token_id = self.tok.sep_token_id
 
         if config.mask_punctuation:
-            punct_ids = [
-                self.tok.convert_tokens_to_ids(c) for c in list(string.punctuation)
-            ]
+            punct_ids = [self.tok.convert_tokens_to_ids(c) for c in list(string.punctuation)]
             self.skiplist = {
                 tid for tid in punct_ids if tid is not None and tid != self.tok.unk_token_id
             }
         else:
             self.skiplist = set()
+
+        # Validate indexed_fields against declared markers
+        for fname in config.indexed_fields or []:
+            if fname not in self.field_marker_ids:
+                raise ValueError(
+                    f"config.indexed_fields contains '{fname}' but it is not in "
+                    f"config.field_markers (declared: {sorted(self.field_marker_ids)})"
+                )
+
+        # Tokens always kept when index_special_tokens=True
+        specials: List[int] = [self.D_marker_token_id]
+        if self.cls_token_id is not None:
+            specials.append(self.cls_token_id)
+        if self.sep_token_id is not None:
+            specials.append(self.sep_token_id)
+        self._special_keep_ids: List[int] = sorted(set(specials))
 
         config.validate_doc_maxlen()
 
@@ -161,6 +202,27 @@ class DocTokenizer:
         if self.tok.pad_token_id is not None:
             mask &= ids != self.tok.pad_token_id
         return mask
+
+    def indexed_token_mask(self, ids: torch.Tensor) -> torch.Tensor:
+        """Per-token boolean mask of positions kept under the configured indexed_fields.
+
+        When ``config.indexed_fields`` is empty, this is all-True (no filtering). When
+        non-empty, only tokens inside the declared field spans (plus optional special
+        tokens) are True; tokens outside (e.g. body when ``indexed_fields=['title']``)
+        are False so their post-encoder embeddings get zeroed and contribute nothing
+        to MaxSim/loss/index.
+        """
+        # Local import to avoid coupling tokenizer module to a runtime helper.
+        from colbert.documents.field_mask import compute_indexed_mask
+
+        return compute_indexed_mask(
+            input_ids=ids,
+            field_marker_ids=self.field_marker_ids,
+            indexed_fields=list(self.config.indexed_fields or []),
+            keep_marker_tokens=bool(self.config.index_field_markers),
+            keep_special_tokens=bool(self.config.index_special_tokens),
+            special_token_ids=self._special_keep_ids,
+        )
 
     def _assert_within_model_max(self, maxlen: int) -> None:
         cap = getattr(self.tok, "model_max_length", None)

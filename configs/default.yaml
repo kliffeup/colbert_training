@@ -21,6 +21,12 @@ max_passages_per_doc_factor: 4   # K' = retrieve_top_k * factor when aggregating
 field_format: "title_body"       # "body_only" | "title_body" | "url_title_body" | "tagged"
 field_format_template: "<title>{title}</title><body>{body}</body>"
 
+# Field-level masking (defaults are no-ops: all tokens are kept, current behavior)
+field_markers: {}                # e.g. {title: ["[TITLE_BEGIN]", "[TITLE_END]"], body: [...]}
+indexed_fields: []               # e.g. ["title"]; empty = keep everything (no field filter)
+index_field_markers: false       # whether the marker tokens themselves count as kept
+index_special_tokens: true       # whether [CLS]/[SEP]/[D] are kept regardless of field
+
 # Training — Phase 1 (triples)
 bsize: 768
 accumsteps: 1
