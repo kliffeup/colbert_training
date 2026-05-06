@@ -129,8 +129,14 @@ python scripts/preprocess_msmarco_docs.py \
 ```
 
 Both modes also mine Phase 1 training triples (`triples.docs.tsv` for e2e or
-`triples.passages.tsv` for maxp) by sampling negatives from `msmarco-doctrain-top100`.
-Tunable via `--negatives-per-positive` (default 4) and `--seed`.
+`triples.passages.tsv` for maxp) from `msmarco-doctrain-top100`. Two strategies:
+
+| `--negative-strategy` | Behavior |
+|---|---|
+| `random` (default) | Uniformly sample N negatives per (query, positive) — more diversity. |
+| `top` | Take the top-N BM25-scored negatives — deterministic, harder, no diversity. |
+
+Other knobs: `--negatives-per-positive` (default 4), `--seed` (only used by `random`).
 
 Field formatting strategies (`--format`): `body_only`, `title_body`, `url_title_body`, `tagged`.
 The `tagged` strategy uses `--field-format-template` (default

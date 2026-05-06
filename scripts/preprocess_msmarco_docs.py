@@ -157,11 +157,15 @@ def _iter_top100(path: Path):
             yield qid, docid
 
 
+NEGATIVE_STRATEGIES = ("random", "top")
+
+
 def build_triples(
     input_dir: Path,
     output_path: Path,
     negatives_per_positive: int,
     seed: int,
+    negative_strategy: str = "random",
     docid_remap: dict[str, str] | None = None,
 ) -> None:
     """Mine ``query<TAB>pos<TAB>neg`` triples from BM25 top-100 + qrels.
@@ -170,13 +174,25 @@ def build_triples(
         input_dir: Directory containing ``msmarco-doctrain-{queries,qrels}.tsv`` and
             ``msmarco-doctrain-top100``.
         output_path: TSV target.
-        negatives_per_positive: Number of negatives sampled per (query, positive) pair.
-        seed: RNG seed for reproducible sampling.
+        negatives_per_positive: Number of negatives per (query, positive) pair.
+        seed: RNG seed (only used when ``negative_strategy='random'``).
+        negative_strategy: How to pick negatives from the BM25 candidate list (after
+            removing labeled positives):
+              * ``'random'`` — uniform random sample of N (default, gives variety).
+              * ``'top'``    — take the first N candidates in BM25-rank order, i.e. the
+                               highest-scored negatives. Deterministic; produces harder
+                               negatives at the cost of less diversity.
         docid_remap: Optional ``docid -> id`` mapping to apply to both pos and neg before
             writing (e.g. doc -> first-passage id for maxp mode). Triples whose pos or neg
             cannot be mapped are dropped.
     """
     import random
+
+    if negative_strategy not in NEGATIVE_STRATEGIES:
+        raise ValueError(
+            f"unknown negative_strategy={negative_strategy!r}; "
+            f"expected one of {NEGATIVE_STRATEGIES}"
+        )
 
     qrels_path = input_dir / "msmarco-doctrain-qrels.tsv"
     queries_path = input_dir / "msmarco-doctrain-queries.tsv"
@@ -194,7 +210,10 @@ def build_triples(
 
     logger.info(
         f"Mining triples from {top100_path.name} + qrels "
-        f"({len(positives):,} queries with positives, {negatives_per_positive} neg/pos, seed={seed})"
+        f"({len(positives):,} queries with positives, {negatives_per_positive} neg/pos, "
+        f"strategy={negative_strategy}"
+        + (f", seed={seed}" if negative_strategy == 'random' else "")
+        + ")"
     )
 
     # Group top-100 candidates by qid (preserving rank order). Streams once.
@@ -220,7 +239,11 @@ def build_triples(
                 continue
             for pos_docid in pos_docids:
                 k = min(negatives_per_positive, len(negative_pool))
-                negs = rng.sample(negative_pool, k)
+                if negative_strategy == "top":
+                    # Highest-scored negatives — first k in BM25-rank order.
+                    negs = negative_pool[:k]
+                else:
+                    negs = rng.sample(negative_pool, k)
                 for neg_docid in negs:
                     if docid_remap is not None:
                         pos_id = docid_remap.get(pos_docid)
@@ -251,6 +274,7 @@ def run_e2e(
     field_format_template: str,
     negatives_per_positive: int,
     seed: int,
+    negative_strategy: str,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     out_collection = output_dir / "collection.docs.tsv"
@@ -285,6 +309,7 @@ def run_e2e(
         output_path=output_dir / "triples.docs.tsv",
         negatives_per_positive=negatives_per_positive,
         seed=seed,
+        negative_strategy=negative_strategy,
     )
 
 
@@ -302,6 +327,7 @@ def run_maxp(
     stride: int,
     negatives_per_positive: int,
     seed: int,
+    negative_strategy: str,
 ) -> None:
     from transformers import AutoTokenizer
 
@@ -363,6 +389,7 @@ def run_maxp(
         output_path=output_dir / "triples.passages.tsv",
         negatives_per_positive=negatives_per_positive,
         seed=seed,
+        negative_strategy=negative_strategy,
         docid_remap=doc_first_passage,
     )
 
@@ -404,8 +431,17 @@ def main() -> None:
              "mining Phase 1 triples.",
     )
     p.add_argument(
+        "--negative-strategy",
+        choices=NEGATIVE_STRATEGIES,
+        default="random",
+        help="How to pick negatives from the BM25 candidate list: "
+             "'random' = uniform sample of N (default, more variety); "
+             "'top' = take the top-N highest-scored candidates in BM25 rank order "
+             "(deterministic, harder negatives, no diversity).",
+    )
+    p.add_argument(
         "--seed", type=int, default=12345,
-        help="RNG seed for reproducible negative sampling.",
+        help="RNG seed for reproducible negative sampling (used only by --negative-strategy=random).",
     )
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args()
@@ -420,6 +456,7 @@ def main() -> None:
             field_format_template=args.field_format_template,
             negatives_per_positive=args.negatives_per_positive,
             seed=args.seed,
+            negative_strategy=args.negative_strategy,
         )
     else:
         run_maxp(
@@ -432,6 +469,7 @@ def main() -> None:
             stride=args.passage_stride,
             negatives_per_positive=args.negatives_per_positive,
             seed=args.seed,
+            negative_strategy=args.negative_strategy,
         )
 
 
