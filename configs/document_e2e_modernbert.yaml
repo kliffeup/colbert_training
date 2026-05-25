@@ -11,7 +11,7 @@ attn_implementation: "flash_attention_2"
 torch_dtype: "bfloat16"
 
 # Tokenization
-query_maxlen: 32
+query_maxlen: 8192
 doc_maxlen: 8192                # ModernBERT cap
 
 # Document training
@@ -27,7 +27,7 @@ field_markers:
   body:  ["[BODY_BEGIN]",  "[BODY_END]"]
 indexed_fields: ["title"]      # only title content counts; body is contextualized but unscored
 index_field_markers: false     # drop the begin/end markers themselves
-index_special_tokens: true     # keep [CLS]/[SEP]/[D] for the doc-level signal
+index_special_tokens: false     # keep [CLS]/[SEP]/[D] for the doc-level signal
 
 # Training — Phase 1
 bsize: 8                        # 8192-token docs are very heavy; tune to GPU memory
@@ -80,4 +80,4 @@ save_every: 1000
 wandb_enabled: false
 wandb_project: "colbertv2-docs"
 wandb_entity: ""
-wandb_run_name: "e2e_modernbert_8192"
+wandb_run_name: "e2e_modernbert_8192_phase1"
