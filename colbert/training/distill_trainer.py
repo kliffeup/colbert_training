@@ -15,8 +15,8 @@ from tqdm import tqdm
 
 from colbert.config import ColBERTConfig
 from colbert.modeling.colbert import ColBERT
-from colbert.data.collection import Collection
-from colbert.data.distillation import DistillationDataset, DistillationCollator
+from colbert.dataset.collection import Collection
+from colbert.dataset.distillation import DistillationDataset, DistillationCollator
 from colbert.training.loss import distillation_loss, in_batch_negative_loss
 from colbert.training.utils import (
     setup_distributed,
@@ -97,7 +97,7 @@ def train_phase2(
         pin_memory=True,
         drop_last=True,
     )
-    steps_per_epoch = len(loader)
+    steps_per_epoch = max(1, len(loader) // max(1, config.accumsteps))
     logger.info(
         f"Data: {len(dataset):,} tuples, batch_size={config.distill_bsize}, "
         f"~{steps_per_epoch:,} steps/epoch, target={config.distill_maxsteps:,} total steps"
@@ -125,6 +125,10 @@ def train_phase2(
     model.train()
     step = start_step
     epoch = start_epoch
+    micro_step = 0
+    accumulated_loss = 0.0
+    last_kl_val = 0.0
+    last_ib_val = 0.0
 
     pbar = tqdm(
         total=config.distill_maxsteps, initial=start_step,
@@ -191,40 +195,46 @@ def train_phase2(
             else:
                 loss.backward()
 
-            if (step + 1) % config.accumsteps == 0:
-                if scaler is not None:
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    optimizer.step()
-                optimizer.zero_grad()
-                scheduler.step()
+            accumulated_loss += loss.item()
+            last_kl_val = loss_kl.item()
+            last_ib_val = loss_ib.item()
+            micro_step += 1
+
+            if micro_step % config.accumsteps != 0:
+                continue
+
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad()
+            scheduler.step()
 
             step += 1
-            total_loss = loss.item() * config.accumsteps
+            total_loss = accumulated_loss
+            accumulated_loss = 0.0
             pbar.update(1)
             pbar.set_postfix(loss=f"{total_loss:.4f}", epoch=epoch)
 
             if is_main_process() and step % config.log_every == 0:
                 lr = scheduler.get_last_lr()[0]
-                kl_val = loss_kl.item()
-                ib_val = loss_ib.item()
                 logger.info(
                     f"Step {step}/{config.distill_maxsteps} | "
-                    f"Loss: {total_loss:.4f} (KL: {kl_val:.4f}, IB: {ib_val:.4f}) | "
+                    f"Loss: {total_loss:.4f} (KL: {last_kl_val:.4f}, IB: {last_ib_val:.4f}) | "
                     f"LR: {lr:.2e}"
                 )
                 if writer is not None:
                     writer.add_scalar("train/loss", total_loss, step)
-                    writer.add_scalar("train/loss_kl", kl_val, step)
-                    writer.add_scalar("train/loss_ib", ib_val, step)
+                    writer.add_scalar("train/loss_kl", last_kl_val, step)
+                    writer.add_scalar("train/loss_ib", last_ib_val, step)
                     writer.add_scalar("train/lr", lr, step)
                 if config.wandb_enabled:
                     import wandb
                     wandb.log({
                         "train/loss": total_loss,
-                        "train/loss_kl": kl_val,
-                        "train/loss_ib": ib_val,
+                        "train/loss_kl": last_kl_val,
+                        "train/loss_ib": last_ib_val,
                         "train/lr": lr,
                     }, step=step)
 

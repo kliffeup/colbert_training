@@ -11,8 +11,8 @@ from tqdm import tqdm
 from sentence_transformers import CrossEncoder
 
 from colbert.config import ColBERTConfig
-from colbert.data.queries import Queries
-from colbert.data.collection import Collection
+from colbert.dataset.queries import Queries
+from colbert.dataset.collection import Collection
 
 logger = logging.getLogger(__name__)
 

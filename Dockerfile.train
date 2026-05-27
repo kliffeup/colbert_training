@@ -1,0 +1,136 @@
+# All-in-one container for ColBERTv2 / ModernBERT training pipeline steps 3-8:
+#   3. smoke_test_batch_size.py  — probe GPU memory ceiling
+#   4. train.py --mode triples    — Phase 1 training
+#   5. distill.py                  — build Phase 2 tuples (index + score)
+#   6. train.py --mode distill    — Phase 2 distillation training
+#   7. index.py                    — build final ColBERTv2 index
+#   8. evaluate.py                 — MS MARCO eval
+#
+# Build:
+#   docker build -f Dockerfile.train -t colbert-train .
+#
+# Run examples below assume:
+#   - data lives under ./data           (mounted as /app/data)
+#   - checkpoints/index under ./experiments  (mounted as /app/experiments)
+#   - HF cache reused from host         (mounted as /root/.cache/huggingface)
+# Use --ipc=host (or --shm-size=8g) for multi-GPU torchrun.
+
+FROM nvidia/cuda:13.2.0-cudnn-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH="${CUDA_HOME}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.12 \
+    python3.12-dev \
+    python3.12-venv \
+    git \
+    curl \
+    ninja-build \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+
+WORKDIR /app
+
+COPY pyproject.toml ./
+
+RUN uv sync --no-dev
+RUN uv add psutil --no-build-isolation
+RUN uv add flash-attn --no-build-isolation
+
+COPY colbert colbert
+COPY scripts scripts
+COPY configs configs
+
+RUN chmod +x scripts/*.sh
+
+# Default config used by the example commands below.
+ENV CONFIG=configs/document_e2e_modernbert.yaml
+
+# `uv run` as entrypoint — caller picks python/torchrun + script.
+# Each of steps 3-8 invokes the container with a different command.
+#
+# ---------------------------------------------------------------------------
+# Step 3 — smoke test (max batch size). Single GPU.
+# ---------------------------------------------------------------------------
+#   docker run --rm --gpus all --ipc=host \
+#       -v $(pwd)/data:/app/data \
+#       -v $(pwd)/experiments:/app/experiments \
+#       -v $HOME/.cache/huggingface:/root/.cache/huggingface \
+#       colbert-train \
+#       python scripts/smoke_test_batch_size.py --config $CONFIG
+#
+# ---------------------------------------------------------------------------
+# Step 4 — Phase 1 training (triples). Multi-GPU via torchrun.
+# ---------------------------------------------------------------------------
+#   docker run --rm --gpus all --ipc=host \
+#       -v $(pwd)/data:/app/data \
+#       -v $(pwd)/experiments:/app/experiments \
+#       -v $HOME/.cache/huggingface:/root/.cache/huggingface \
+#       colbert-train \
+#       torchrun --nproc_per_node=4 scripts/train.py \
+#           --config $CONFIG --mode triples
+#
+# ---------------------------------------------------------------------------
+# Step 5 — build distillation tuples.
+# ---------------------------------------------------------------------------
+#   docker run --rm --gpus all --ipc=host \
+#       -v $(pwd)/data:/app/data \
+#       -v $(pwd)/experiments:/app/experiments \
+#       -v $HOME/.cache/huggingface:/root/.cache/huggingface \
+#       colbert-train \
+#       torchrun --nproc_per_node=4 scripts/distill.py \
+#           --config $CONFIG \
+#           --checkpoint experiments/docs_e2e_modernbert/checkpoints/phase1_final.pt
+#
+# ---------------------------------------------------------------------------
+# Step 6 — Phase 2 distillation training.
+# ---------------------------------------------------------------------------
+#   docker run --rm --gpus all --ipc=host \
+#       -v $(pwd)/data:/app/data \
+#       -v $(pwd)/experiments:/app/experiments \
+#       -v $HOME/.cache/huggingface:/root/.cache/huggingface \
+#       colbert-train \
+#       torchrun --nproc_per_node=4 scripts/train.py \
+#           --config $CONFIG --mode distill \
+#           --init_from experiments/docs_e2e_modernbert/checkpoints/phase1_final.pt \
+#           --tuples data/docs_tagged_title_body_top50/tuples/tuples.jsonl
+#
+# ---------------------------------------------------------------------------
+# Step 7 — indexing. index.py auto-detects all visible GPUs (no torchrun).
+# ---------------------------------------------------------------------------
+#   docker run --rm --gpus all --ipc=host \
+#       -v $(pwd)/data:/app/data \
+#       -v $(pwd)/experiments:/app/experiments \
+#       -v $HOME/.cache/huggingface:/root/.cache/huggingface \
+#       colbert-train \
+#       python scripts/index.py \
+#           --config $CONFIG \
+#           --checkpoint experiments/docs_e2e_modernbert/checkpoints/phase2_final.pt
+#
+# ---------------------------------------------------------------------------
+# Step 8 — evaluation.
+# ---------------------------------------------------------------------------
+#   docker run --rm --gpus all --ipc=host \
+#       -v $(pwd)/data:/app/data \
+#       -v $(pwd)/experiments:/app/experiments \
+#       -v $HOME/.cache/huggingface:/root/.cache/huggingface \
+#       colbert-train \
+#       python scripts/evaluate.py \
+#           --config $CONFIG \
+#           --checkpoint experiments/docs_e2e_modernbert/checkpoints/phase2_final.pt \
+#           --index_path experiments/docs_e2e_modernbert/index
+
+ENTRYPOINT ["uv", "run"]
+CMD ["python", "-c", "print('Pass a command, e.g.: python scripts/index.py --config $CONFIG --checkpoint <path>')"]

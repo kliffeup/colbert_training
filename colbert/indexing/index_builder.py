@@ -21,7 +21,7 @@ from tqdm import tqdm
 
 from colbert.config import ColBERTConfig
 from colbert.modeling.colbert import ColBERT
-from colbert.data.collection import Collection
+from colbert.dataset.collection import Collection
 from colbert.indexing.encoder import (
     encode_collection,
     encode_collection_multigpu,

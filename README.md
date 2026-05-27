@@ -217,15 +217,14 @@ colbert/
 │   ├── colbert.py         # ColBERT model (shared BERT encoder + linear projection)
 │   ├── tokenization.py    # Query/document tokenizers with [Q]/[D] markers
 │   └── similarity.py      # MaxSim scoring function
-├── data/
-│   ├── download.py        # MS MARCO download utilities
-│   ├── download_beir.py   # BEIR dataset download + conversion
-│   ├── download_lotte.py  # LoTTE dataset download
-│   ├── collection.py      # Passage collection reader
+├── dataset/
+│   ├── download_beir.py   # BEIR dataset download + conversion (stub)
+│   ├── download_lotte.py  # LoTTE dataset download (stub)
+│   ├── collection.py      # Passage/document collection (byte-offset indexed)
 │   ├── queries.py         # Query reader
-│   ├── triples.py         # Training triples dataset (Phase 1)
-│   ├── distillation.py    # Distillation tuples dataset (Phase 2)
-│   └── ranking.py         # Qrels and ranking utilities
+│   ├── triples.py         # Streaming Phase 1 triples + collator
+│   ├── distillation.py    # Phase 2 distillation tuples + collator
+│   └── ranking.py         # Qrels readers + ranking I/O
 ├── training/
 │   ├── trainer.py         # Phase 1 training loop (pairwise CE)
 │   ├── distill_trainer.py # Phase 2 training loop (KL-Div + in-batch CE)

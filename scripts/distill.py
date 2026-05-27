@@ -17,9 +17,9 @@ import torch
 
 from colbert.config import ColBERTConfig
 from colbert.modeling.colbert import ColBERT
-from colbert.data.collection import Collection
-from colbert.data.queries import Queries
-from colbert.data.ranking import load_qrels
+from colbert.dataset.collection import Collection
+from colbert.dataset.queries import Queries
+from colbert.dataset.ranking import load_qrels
 from colbert.indexing.index_builder import build_index
 from colbert.evaluation.retriever import ColBERTRetriever
 from colbert.distillation.score_passages import score_passages

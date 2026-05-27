@@ -17,7 +17,8 @@ from tqdm import tqdm
 
 from colbert.config import ColBERTConfig
 from colbert.modeling.colbert import ColBERT
-from colbert.data.triples import StreamingTriplesDataset, TriplesCollator
+from colbert.dataset.collection import Collection
+from colbert.dataset.triples import StreamingTriplesDataset, TriplesCollator
 from colbert.training.loss import pairwise_ce_loss
 from colbert.training.utils import (
     setup_distributed,
@@ -47,10 +48,11 @@ def _log_model_info(model: torch.nn.Module, config: ColBERTConfig, device: torch
 
 
 def _estimate_steps_per_epoch(dataset: StreamingTriplesDataset, config: ColBERTConfig) -> int:
-    """Estimate steps per epoch from line count, world size, and batch size."""
+    """Estimate optimizer steps per epoch from line count, world size, batch size, and accumsteps."""
     world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
     lines_per_rank = dataset.num_lines // world_size
-    return max(1, lines_per_rank // config.bsize)
+    micro_batches = max(1, lines_per_rank // config.bsize)
+    return max(1, micro_batches // max(1, config.accumsteps))
 
 
 def train_phase1(config: ColBERTConfig, resume_from: str | None = None) -> None:
@@ -81,7 +83,11 @@ def train_phase1(config: ColBERTConfig, resume_from: str | None = None) -> None:
         logger.info(f"Resuming from step {start_step}, epoch {start_epoch}")
 
     logger.info(f"Loading training data from {config.triples} ...")
-    dataset = StreamingTriplesDataset(config.triples)
+    collection = None
+    if config.collection and Path(config.collection).exists():
+        logger.info(f"Indexing collection at {config.collection} for docid resolution ...")
+        collection = Collection(config.collection)
+    dataset = StreamingTriplesDataset(config.triples, collection=collection)
     collator = TriplesCollator(config)
 
     loader = DataLoader(
@@ -121,6 +127,8 @@ def train_phase1(config: ColBERTConfig, resume_from: str | None = None) -> None:
     model.train()
     step = start_step
     epoch = start_epoch
+    micro_step = 0
+    accumulated_loss = 0.0
 
     pbar = tqdm(
         total=config.maxsteps, initial=start_step,
@@ -159,17 +167,23 @@ def train_phase1(config: ColBERTConfig, resume_from: str | None = None) -> None:
             else:
                 loss.backward()
 
-            if (step + 1) % config.accumsteps == 0:
-                if scaler is not None:
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    optimizer.step()
-                optimizer.zero_grad()
-                scheduler.step()
+            accumulated_loss += loss.item()
+            micro_step += 1
+
+            if micro_step % config.accumsteps != 0:
+                continue
+
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad()
+            scheduler.step()
 
             step += 1
-            train_loss = loss.item() * config.accumsteps
+            train_loss = accumulated_loss
+            accumulated_loss = 0.0
             pbar.update(1)
             pbar.set_postfix(loss=f"{train_loss:.4f}", epoch=epoch)
 

@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 
 from colbert.config import ColBERTConfig
-from colbert.data.queries import Queries
-from colbert.data.ranking import load_qrels, get_positive_pids
+from colbert.dataset.queries import Queries
+from colbert.dataset.ranking import load_qrels, get_positive_pids
 
 logger = logging.getLogger(__name__)
 

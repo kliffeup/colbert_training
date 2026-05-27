@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from colbert.data.download_lotte import download_lotte
+from colbert.dataset.download_lotte import download_lotte
 
 
 def main():

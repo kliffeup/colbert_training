@@ -24,7 +24,7 @@ import torch
 
 from colbert.config import ColBERTConfig
 from colbert.modeling.colbert import ColBERT
-from colbert.data.collection import Collection
+from colbert.dataset.collection import Collection
 from colbert.indexing.index_builder import build_index
 from colbert.training.utils import load_checkpoint
 

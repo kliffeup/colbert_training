@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from colbert.data.download_beir import download_beir_datasets, BEIR_DATASETS
+from colbert.dataset.download_beir import download_beir_datasets, BEIR_DATASETS
 
 
 def main():

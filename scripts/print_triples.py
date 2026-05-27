@@ -2,7 +2,7 @@
 
 from itertools import islice
 
-from colbert.data.triples import StreamingTriplesDataset
+from colbert.dataset.triples import StreamingTriplesDataset
 
 NUM_EXAMPLES = 5
 TRIPLES_PATH = "data/triples.train.small.tsv"

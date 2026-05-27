@@ -18,8 +18,8 @@ import torch
 
 from colbert.config import ColBERTConfig
 from colbert.modeling.colbert import ColBERT
-from colbert.data.queries import Queries
-from colbert.data.ranking import load_qrels, save_ranking
+from colbert.dataset.queries import Queries
+from colbert.dataset.ranking import load_qrels, save_ranking
 from colbert.evaluation.retriever import ColBERTRetriever
 from colbert.evaluation.metrics import evaluate_ranking
 from colbert.evaluation.doc_evaluator import retrieve_documents

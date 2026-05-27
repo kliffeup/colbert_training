@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 from colbert.config import ColBERTConfig
 from colbert.modeling.colbert import ColBERT
-from colbert.data.collection import Collection
+from colbert.dataset.collection import Collection
 
 logger = logging.getLogger(__name__)
 
