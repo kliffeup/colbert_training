@@ -24,6 +24,7 @@ from colbert.training.utils import (
     is_main_process,
     save_checkpoint,
     load_checkpoint,
+    prune_step_checkpoints,
     get_linear_schedule_with_warmup,
 )
 
@@ -243,6 +244,9 @@ def train_phase2(
                 save_checkpoint(
                     model, optimizer, step, ckpt_path,
                     scheduler=scheduler, scaler=scaler, epoch=epoch,
+                )
+                prune_step_checkpoints(
+                    config.checkpoint_dir, "phase2", config.save_total_limit,
                 )
 
         epoch += 1

@@ -102,6 +102,7 @@ class ColBERTConfig:
     # Logging
     log_every: int = 500
     save_every: int = 10_000
+    save_total_limit: int = -1  # -1 = keep all step-checkpoints; N>0 keeps the N most recent
 
     # Wandb
     wandb_enabled: bool = False

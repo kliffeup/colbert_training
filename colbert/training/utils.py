@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -79,6 +80,36 @@ def save_checkpoint(
 
     torch.save(checkpoint, path)
     logger.info(f"Saved checkpoint at step {step} (epoch {epoch}) to {path}")
+
+
+_STEP_CKPT_RE = re.compile(r"_step(\d+)\.pt$")
+
+
+def prune_step_checkpoints(checkpoint_dir: str | Path, prefix: str, keep: int) -> None:
+    """Delete oldest `prefix_step{N}.pt` files, keeping only the `keep` most recent.
+
+    No-op when `keep < 0`. The `prefix_final.pt` companion is never matched (no `_step`),
+    so it's never pruned. Only rank 0 acts.
+    """
+    if keep < 0 or not is_main_process():
+        return
+    d = Path(checkpoint_dir)
+    if not d.is_dir():
+        return
+    candidates = []
+    for p in d.iterdir():
+        if not p.is_file() or not p.name.startswith(f"{prefix}_step"):
+            continue
+        m = _STEP_CKPT_RE.search(p.name)
+        if m:
+            candidates.append((int(m.group(1)), p))
+    candidates.sort(key=lambda x: x[0])
+    for _, path in candidates[:-keep] if keep > 0 else candidates:
+        try:
+            path.unlink()
+            logger.info(f"Pruned old checkpoint: {path}")
+        except OSError as e:
+            logger.warning(f"Could not delete {path}: {e}")
 
 
 def load_checkpoint(
