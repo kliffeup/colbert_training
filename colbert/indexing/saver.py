@@ -27,13 +27,26 @@ class IndexSaver:
     def load_codec(self) -> ResidualCodec:
         return ResidualCodec.load(str(self.index_dir / "codec.pt"))
 
+    def compressed_embeddings_paths(self) -> tuple[Path, Path]:
+        """Canonical (centroid_ids, packed_residuals) ``.npy`` paths.
+
+        Used by the streaming index build to write these artifacts directly to disk
+        (it never holds the full compressed arrays in RAM to hand to
+        ``save_compressed_embeddings``).
+        """
+        return (
+            self.index_dir / "centroid_ids.npy",
+            self.index_dir / "packed_residuals.npy",
+        )
+
     def save_compressed_embeddings(
         self,
         centroid_ids: np.ndarray,
         packed_residuals: np.ndarray,
     ) -> None:
-        np.save(self.index_dir / "centroid_ids.npy", centroid_ids)
-        np.save(self.index_dir / "packed_residuals.npy", packed_residuals)
+        cids_path, residuals_path = self.compressed_embeddings_paths()
+        np.save(cids_path, centroid_ids)
+        np.save(residuals_path, packed_residuals)
 
     def load_compressed_embeddings(self) -> tuple[np.ndarray, np.ndarray]:
         centroid_ids = np.load(self.index_dir / "centroid_ids.npy")

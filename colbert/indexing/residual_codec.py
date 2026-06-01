@@ -94,6 +94,15 @@ class ResidualCodec:
         self._ensure_quantization_params()
         vectors = vectors.float()
 
+        if vectors.shape[0] == 0:
+            # Empty / all-masked document: nothing to compress.
+            codes_per_byte = 8 // self.nbits
+            num_bytes = math.ceil(self.dim / codes_per_byte)
+            return (
+                np.empty(0, dtype=np.uint32),
+                np.empty((0, num_bytes), dtype=np.uint8),
+            )
+
         # Find nearest centroids
         # (n, num_centroids)
         sims = vectors @ self.centroids.t()
@@ -136,19 +145,17 @@ class ResidualCodec:
         return centroids + residuals
 
     def _quantize(self, residuals: torch.Tensor) -> torch.Tensor:
-        """Quantize residuals to integer codes."""
+        """Quantize residuals to integer codes.
+
+        ``code[i, d]`` = number of bucket boundaries that ``residuals[i, d]`` exceeds,
+        i.e. its bucket index in ``[0, num_levels)``.  Vectorized equivalent of a
+        per-dimension, per-boundary comparison loop.
+        """
         assert self._bucket_boundaries is not None
-        n = residuals.shape[0]
-        codes = torch.zeros(n, self.dim, dtype=torch.uint8)
-
-        boundaries = self._bucket_boundaries  # (dim, num_levels-1)
-        for d in range(self.dim):
-            col = residuals[:, d]
-            code = torch.zeros(n, dtype=torch.uint8)
-            for b in range(self.num_levels - 1):
-                code += (col > boundaries[d, b]).byte()
-            codes[:, d] = code
-
+        boundaries = self._bucket_boundaries.to(residuals.device)  # (dim, num_levels-1)
+        # (n, dim, 1) > (1, dim, num_levels-1) -> (n, dim, num_levels-1)
+        gt = residuals.unsqueeze(-1) > boundaries.unsqueeze(0)
+        codes = gt.sum(dim=-1).to(torch.uint8)  # (n, dim)
         return codes
 
     def _dequantize(self, codes: torch.Tensor) -> torch.Tensor:
@@ -170,16 +177,21 @@ class ResidualCodec:
         For nbits=2: 4 codes per byte -> 128/4 = 32 bytes
         """
         n = codes.shape[0]
-        codes_np = codes.numpy().astype(np.uint8)
+        codes_np = codes.cpu().numpy().astype(np.uint8)
 
         codes_per_byte = 8 // self.nbits
         num_bytes = math.ceil(self.dim / codes_per_byte)
-        packed = np.zeros((n, num_bytes), dtype=np.uint8)
 
-        for i in range(self.dim):
-            byte_idx = i // codes_per_byte
-            bit_offset = (i % codes_per_byte) * self.nbits
-            packed[:, byte_idx] |= codes_np[:, i] << bit_offset
+        # Group the dim codes into bytes of `codes_per_byte` codes each, packing code
+        # j-within-byte at bit offset j*nbits. Pad the final partial byte with zeros.
+        pad = num_bytes * codes_per_byte - self.dim
+        if pad:
+            codes_np = np.concatenate(
+                [codes_np, np.zeros((n, pad), dtype=np.uint8)], axis=1
+            )
+        reshaped = codes_np.reshape(n, num_bytes, codes_per_byte)
+        shifts = (np.arange(codes_per_byte, dtype=np.uint8) * self.nbits)
+        packed = (reshaped << shifts).sum(axis=2).astype(np.uint8)
 
         return packed
 

@@ -8,6 +8,7 @@ No DDP / torchrun required.  The master process:
 
 from __future__ import annotations
 
+import gc
 import logging
 import math
 import shutil
@@ -23,11 +24,12 @@ from colbert.config import ColBERTConfig
 from colbert.modeling.colbert import ColBERT
 from colbert.dataset.collection import Collection
 from colbert.indexing.encoder import (
-    encode_collection,
-    encode_collection_multigpu,
+    encode_and_compress_collection,
+    encode_and_compress_collection_multigpu,
     sample_embeddings,
 )
 from colbert.indexing.residual_codec import ResidualCodec
+from colbert.indexing.resource_monitor import ResourceMonitor
 from colbert.indexing.saver import IndexSaver
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,10 @@ def build_index(
 
     saver = IndexSaver(output)
 
+    # Tracks process RAM and the index output dir's on-disk size across stages.
+    monitor = ResourceMonitor(output, logger)
+    monitor.report("build start")
+
     # ------------------------------------------------------------------
     # Stage 1: Centroid Selection
     # ------------------------------------------------------------------
@@ -86,6 +92,11 @@ def build_index(
     sampled_embeddings = sample_embeddings(
         model, collection, config, batch_size=batch_size,
     )
+    # sample_embeddings returns a CPU array; its forward-pass GPU activations are now
+    # out of scope. Reclaim them before k-means so they don't inflate the Stage-1 peak.
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     num_centroids = _compute_num_centroids(len(collection) * 60)
     dim = sampled_embeddings.shape[1]
 
@@ -106,86 +117,94 @@ def build_index(
 
     logger.info(f"Centroids shape: {centroids.shape}")
 
-    # ------------------------------------------------------------------
-    # Stage 2: Passage Encoding (multi-GPU spawn or single-GPU)
-    # ------------------------------------------------------------------
-    logger.info("=== Stage 2: Passage Encoding ===")
+    # Free Stage-1 GPU memory (k-means state + cached allocations) before encoding,
+    # so Stage 2 can use a larger batch size. centroids/sampled_embeddings are on CPU.
+    del kmeans
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
 
-    if ngpus > 1:
-        all_embeddings, all_doclens, all_pids = encode_collection_multigpu(
-            model, collection, config,
-            num_gpus=ngpus,
-            shard_dir=shard_dir,
-            batch_size=batch_size,
-            doc_maxlen=doc_maxlen,
-        )
-    else:
-        all_embeddings, all_doclens, all_pids = encode_collection(
-            model, collection, config,
-            batch_size=batch_size,
-            doc_maxlen=doc_maxlen,
-        )
+    monitor.report("after Stage 1 (centroids)")
 
     # ------------------------------------------------------------------
-    # Stage 3: Compression
+    # Codec quantization params (trained from the Stage-1 sample)
     # ------------------------------------------------------------------
-    logger.info("=== Stage 3: Compression ===")
-
+    # Residual buckets are estimated from the in-distribution Stage-1 sample
+    # (already in RAM) against the trained centroids — the canonical ColBERTv2
+    # choice — so we never need the full embedding set resident to set them.
     codec = ResidualCodec(centroids, nbits=config.nbits)
 
-    sample_size = min(len(all_embeddings), 100_000)
+    sample_size = min(len(sampled_embeddings), 100_000)
     rng = np.random.default_rng(seed=42)
-    sample_idx = rng.choice(len(all_embeddings), size=sample_size, replace=False)
-    sample_vecs = torch.from_numpy(all_embeddings[sample_idx])
+    sample_idx = rng.choice(len(sampled_embeddings), size=sample_size, replace=False)
+    sample_vecs = torch.from_numpy(sampled_embeddings[sample_idx])
 
     sims = sample_vecs @ centroids.t()
     sample_cids = sims.argmax(dim=1)
     sample_residuals = sample_vecs - centroids[sample_cids]
     codec.set_quantization_params(sample_residuals)
+    del sampled_embeddings, sample_vecs, sims, sample_cids, sample_residuals
 
-    logger.info(
-        f"Compressing {len(all_embeddings)} embeddings "
-        f"with {config.nbits}-bit residuals"
-    )
-    chunk_size = 1_000_000
-    all_centroid_ids_list = []
-    all_packed_list = []
+    # ------------------------------------------------------------------
+    # Stage 2+3: Fused Encoding + Compression (streamed to disk)
+    # ------------------------------------------------------------------
+    # Each batch is encoded then compressed immediately; only the compressed codes
+    # (~40 B/token) are streamed to disk. The raw float32 embeddings are never
+    # accumulated, so peak RAM stays at ~one batch regardless of collection size.
+    logger.info("=== Stage 2+3: Encoding + Compression (streaming) ===")
 
-    for start in tqdm(range(0, len(all_embeddings), chunk_size), desc="Compressing"):
-        end = min(start + chunk_size, len(all_embeddings))
-        chunk = torch.from_numpy(all_embeddings[start:end])
-        cids, packed = codec.encode(chunk)
-        all_centroid_ids_list.append(cids)
-        all_packed_list.append(packed)
+    cids_path, residuals_path = saver.compressed_embeddings_paths()
 
-    all_centroid_ids = np.concatenate(all_centroid_ids_list)
-    all_packed_residuals = np.concatenate(all_packed_list)
+    if ngpus > 1:
+        all_doclens, all_pids, num_embeddings = encode_and_compress_collection_multigpu(
+            model, collection, config, codec,
+            num_gpus=ngpus, shard_dir=shard_dir,
+            cids_path=cids_path, residuals_path=residuals_path,
+            batch_size=batch_size, doc_maxlen=doc_maxlen,
+        )
+    else:
+        all_doclens, all_pids, num_embeddings = encode_and_compress_collection(
+            model, collection, config, codec,
+            work_dir=shard_dir,
+            cids_path=cids_path, residuals_path=residuals_path,
+            batch_size=batch_size, doc_maxlen=doc_maxlen,
+            monitor=monitor,
+        )
+
+    monitor.report("after Stage 2+3 (encode+compress)")
 
     # ------------------------------------------------------------------
     # Stage 4: Index Inversion
     # ------------------------------------------------------------------
     logger.info("=== Stage 4: Index Inversion ===")
 
+    # Re-read the streamed centroid ids from disk in blocks (never the whole array
+    # in a second copy); the inverted-list dict itself scales with total tokens.
+    centroid_ids_mm = np.load(cids_path, mmap_mode="r")
     inverted_lists: Dict[int, List[int]] = {}
-    for emb_id, cid in enumerate(all_centroid_ids):
-        cid = int(cid)
-        if cid not in inverted_lists:
-            inverted_lists[cid] = []
-        inverted_lists[cid].append(emb_id)
+    block_size = 1_000_000
+    for start in tqdm(range(0, num_embeddings, block_size), desc="Inverting"):
+        block = np.asarray(centroid_ids_mm[start:start + block_size])
+        for off, cid in enumerate(block):
+            inverted_lists.setdefault(int(cid), []).append(start + off)
+    del centroid_ids_mm
 
     logger.info(f"Built inverted lists for {len(inverted_lists)} centroids")
+    monitor.report("after Stage 4 (inversion)")
 
     # ------------------------------------------------------------------
     # Save
     # ------------------------------------------------------------------
+    # centroid_ids.npy / packed_residuals.npy were already written by the streaming
+    # pass; only the remaining artifacts need saving here.
     saver.save_codec(codec)
-    saver.save_compressed_embeddings(all_centroid_ids, all_packed_residuals)
     saver.save_doclens(all_doclens)
     saver.save_pids(all_pids)
     saver.save_inverted_lists(inverted_lists)
     saver.save_metadata({
         "num_passages": len(all_pids),
-        "num_embeddings": len(all_centroid_ids),
+        "num_embeddings": num_embeddings,
         "num_centroids": int(centroids.shape[0]),
         "dim": int(centroids.shape[1]),
         "nbits": config.nbits,
@@ -193,12 +212,10 @@ def build_index(
         "num_gpus_used": ngpus,
     })
 
-    index_size_mb = (
-        all_centroid_ids.nbytes + all_packed_residuals.nbytes
-    ) / (1024 * 1024)
+    index_size_mb = num_embeddings * codec.bytes_per_vector / (1024 * 1024)
     logger.info(
         f"Index built at {output} — "
-        f"{len(all_pids)} passages, {len(all_centroid_ids)} embeddings, "
+        f"{len(all_pids)} passages, {num_embeddings} embeddings, "
         f"~{index_size_mb:.1f} MiB compressed"
     )
 
@@ -206,4 +223,5 @@ def build_index(
         shutil.rmtree(shard_dir)
         logger.info("Cleaned up temporary shard files")
 
+    monitor.report("build complete")
     return str(output)
