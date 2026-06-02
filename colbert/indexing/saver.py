@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -93,4 +94,33 @@ class IndexSaver:
 
     def load_metadata(self) -> Dict[str, Any]:
         with open(self.index_dir / "metadata.json") as f:
+            return json.load(f)
+
+    # ------------------------------------------------------------------
+    # Build state (for resumable indexing)
+    # ------------------------------------------------------------------
+    @property
+    def _build_state_path(self) -> Path:
+        return self.index_dir / "_build_state.json"
+
+    def save_build_state(self, state: Dict[str, Any]) -> None:
+        """Persist the build-state JSON atomically (temp file + ``os.replace``).
+
+        Records which build stage has completed and the input fingerprint, so a
+        ``--resume`` run can pick up where a stopped container left off.
+        """
+        path = self._build_state_path
+        tmp = path.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+
+    def load_build_state(self) -> Optional[Dict[str, Any]]:
+        """Return the persisted build state, or ``None`` if no build has started."""
+        path = self._build_state_path
+        if not path.exists():
+            return None
+        with open(path, encoding="utf-8") as f:
             return json.load(f)

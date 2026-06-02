@@ -11,6 +11,7 @@ once the row count is known.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Tuple
 
@@ -29,16 +30,50 @@ class CompressedShardWriter:
     """
 
     def __init__(self, work_dir: str | Path, bytes_per_residual: int, tag: str = ""):
-        self.work_dir = Path(work_dir)
-        self.work_dir.mkdir(parents=True, exist_ok=True)
-        self.bpr = int(bytes_per_residual)
+        self._setup_paths(work_dir, bytes_per_residual, tag)
         self.total = 0
-
-        self.cids_bin = self.work_dir / f"centroid_ids{tag}.bin"
-        self.res_bin = self.work_dir / f"packed_residuals{tag}.bin"
         self._cids_f = open(self.cids_bin, "wb")
         self._res_f = open(self.res_bin, "wb")
         self._closed = False
+
+    def _setup_paths(self, work_dir: str | Path, bytes_per_residual: int, tag: str) -> None:
+        self.work_dir = Path(work_dir)
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+        self.bpr = int(bytes_per_residual)
+        self.cids_bin = self.work_dir / f"centroid_ids{tag}.bin"
+        self.res_bin = self.work_dir / f"packed_residuals{tag}.bin"
+
+    @classmethod
+    def open_resume(
+        cls,
+        work_dir: str | Path,
+        bytes_per_residual: int,
+        tag: str = "",
+        total_tokens: int = 0,
+    ) -> "CompressedShardWriter":
+        """Reopen existing temp binaries for appending, resuming a checkpointed pass.
+
+        Truncates both ``.bin`` files to exactly ``total_tokens`` rows (the last
+        committed checkpoint boundary), discarding any bytes written by a batch that
+        was in flight when the previous run was killed, then opens them for append.
+        """
+        self = cls.__new__(cls)
+        self._setup_paths(work_dir, bytes_per_residual, tag)
+        total_tokens = int(total_tokens)
+        for path, row_bytes in ((self.cids_bin, 4), (self.res_bin, self.bpr)):
+            with open(path, "r+b") as f:
+                f.truncate(total_tokens * row_bytes)
+        self._cids_f = open(self.cids_bin, "ab")
+        self._res_f = open(self.res_bin, "ab")
+        self.total = total_tokens
+        self._closed = False
+        return self
+
+    def flush_sync(self) -> None:
+        """Flush both temp binaries durably to disk — the checkpoint commit barrier."""
+        for f in (self._cids_f, self._res_f):
+            f.flush()
+            os.fsync(f.fileno())
 
     def append(self, centroid_ids: np.ndarray, packed: np.ndarray) -> None:
         """Append one batch of compressed codes to the temp binaries."""

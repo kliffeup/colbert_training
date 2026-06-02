@@ -83,14 +83,24 @@ class Collection:
         size = base + (1 if rank < rem else 0)
         return self._pid_order[start:start + size]
 
-    def iterate(self, batch_size: int) -> Iterator[List[Tuple[str, str]]]:
-        """Yield batches of (pid, text) walking the file sequentially."""
+    def iterate(
+        self, batch_size: int, start: int = 0
+    ) -> Iterator[List[Tuple[str, str]]]:
+        """Yield batches of (pid, text) walking the file sequentially.
+
+        ``start`` skips the first ``start`` documents (in deterministic file order)
+        before emitting any batch — used to resume an interrupted encode pass.
+        """
+        seen = 0
         batch: List[Tuple[str, str]] = []
         with open(self.path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.rstrip("\n")
                 tab = line.find("\t")
                 if tab <= 0:
+                    continue
+                seen += 1
+                if seen <= start:
                     continue
                 batch.append((line[:tab], line[tab + 1:]))
                 if len(batch) == batch_size:
@@ -100,10 +110,15 @@ class Collection:
             yield batch
 
     def iterate_shard(
-        self, rank: int, world_size: int, batch_size: int
+        self, rank: int, world_size: int, batch_size: int, start: int = 0
     ) -> Iterator[List[Tuple[str, str]]]:
-        """Yield (pid, text) batches for this rank's contiguous slice."""
+        """Yield (pid, text) batches for this rank's contiguous slice.
+
+        ``start`` skips the first ``start`` documents *within this shard* (in
+        deterministic shard order) — used to resume an interrupted encode pass.
+        """
         shard_pids = set(self._shard_pid_slice(rank, world_size))
+        seen = 0
         batch: List[Tuple[str, str]] = []
         with open(self.path, encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -113,6 +128,9 @@ class Collection:
                     continue
                 pid = line[:tab]
                 if pid not in shard_pids:
+                    continue
+                seen += 1
+                if seen <= start:
                     continue
                 batch.append((pid, line[tab + 1:]))
                 if len(batch) == batch_size:

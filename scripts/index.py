@@ -11,6 +11,12 @@ Usage:
     # Limit to 2 GPUs:
     python scripts/index.py --config configs/default.yaml \
         --checkpoint experiments/checkpoints/phase2_final.pt --num_gpus 2
+
+    # Resume an interrupted build (e.g. after a container stop). Re-run the exact
+    # same command with --resume; it continues from the last checkpoint. The model
+    # checkpoint and collection/config must be unchanged.
+    python scripts/index.py --config configs/default.yaml \
+        --checkpoint experiments/checkpoints/phase2_final.pt --resume
 """
 
 import argparse
@@ -41,6 +47,16 @@ def main():
         "--num_gpus", type=int, default=None,
         help="Number of GPUs for encoding (default: all visible CUDA devices)",
     )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Resume an interrupted build in index_path instead of rebuilding. "
+             "Requires the same collection, config, and model checkpoint.",
+    )
+    parser.add_argument(
+        "--checkpoint_every", type=int, default=None,
+        help="Passages between encode-pass checkpoints (resume granularity); "
+             "overrides config.index_checkpoint_every.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -49,6 +65,8 @@ def main():
     )
 
     config = ColBERTConfig.from_yaml(args.config)
+    if args.checkpoint_every is not None:
+        config.index_checkpoint_every = args.checkpoint_every
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     model = ColBERT(config).to(device)
@@ -66,6 +84,7 @@ def main():
         batch_size=args.batch_size,
         doc_maxlen=args.doc_maxlen,
         num_gpus=args.num_gpus,
+        resume=args.resume,
     )
 
 

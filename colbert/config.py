@@ -74,6 +74,7 @@ class ColBERTConfig:
     # Indexing
     nbits: int = 2
     kmeans_niters: int = 20
+    index_checkpoint_every: int = 2000  # passages between encode-pass checkpoints (resume granularity)
 
     # Retrieval
     nprobe: int = 2
