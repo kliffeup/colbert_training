@@ -25,16 +25,16 @@ field_format_template: "[TITLE_BEGIN]{title}[TITLE_END][BODY_BEGIN]{body}[BODY_E
 field_markers:
   title: ["[TITLE_BEGIN]", "[TITLE_END]"]
   body:  ["[BODY_BEGIN]",  "[BODY_END]"]
-indexed_fields: ["title"]      # only title content counts; body is contextualized but unscored
+indexed_fields: ["title", "body"]      # only title content counts; body is contextualized but unscored
 index_field_markers: false     # drop the begin/end markers themselves
 index_special_tokens: false     # keep [CLS]/[SEP]/[D] for the doc-level signal
 
 # Training — Phase 1
-bsize: 8                        # 8192-token docs are very heavy; tune to GPU memory
+bsize: 4                        # 8192-token docs are very heavy; tune to GPU memory
 accumsteps: 8
 lr: 1.0e-5
-warmup: 1333
-maxsteps: 10000
+warmup: 7168
+maxsteps: 71682
 
 # Training — Phase 2 (distillation)
 distill_bsize: 2
@@ -56,16 +56,16 @@ ncandidates_factor: 4096
 retrieve_top_k: 1000
 
 # Data paths
-data_dir: "data/docs"
-collection: "data/docs/collection.docs.tsv"
-queries_train: "data/docs/queries.docs.train.tsv"
-queries_dev: "data/docs/queries.docs.dev.tsv"
-qrels_train: "data/docs/qrels.docs.train.tsv"
-qrels_dev: "data/docs/qrels.docs.dev.tsv"
-triples: "data/docs/triples.docs.tsv"
-tuples_dir: "data/docs/tuples"
-documents_dir: "data/docs"
-passage_to_doc_map: "data/docs/passage_to_doc.tsv"
+data_dir: "data/docs_tagged_title_body_top50"
+collection: "data/docs_tagged_title_body_top50/collection.docs.tsv"
+queries_train: "data/docs_tagged_title_body_top50/queries.docs.train.tsv"
+queries_dev: "data/docs_tagged_title_body_top50/queries.docs.dev.tsv"
+qrels_train: "data/docs_tagged_title_body_top50/qrels.docs.train.tsv"
+qrels_dev: "data/docs_tagged_title_body_top50/qrels.docs.dev.tsv"
+triples: "data/docs_tagged_title_body_top50/triples_shuffled.docs.tsv"
+tuples_dir: "data/docs_tagged_title_body_top50/tuples"
+documents_dir: "data/docs_tagged_title_body_top50"
+passage_to_doc_map: "data/docs_tagged_title_body_top50/passage_to_doc.tsv"
 
 # Output paths
 output_dir: "experiments/docs_e2e_modernbert"
@@ -75,9 +75,10 @@ checkpoint_dir: "experiments/docs_e2e_modernbert/checkpoints"
 # Logging
 log_every: 10
 save_every: 1000
+save_total_limit: 3
 
 # Wandb
-wandb_enabled: false
-wandb_project: "colbertv2-docs"
+wandb_enabled: true
+wandb_project: "colbert-modernbert"
 wandb_entity: ""
 wandb_run_name: "e2e_modernbert_8192_phase1"
