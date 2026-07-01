@@ -42,6 +42,25 @@ def test_encode_decode_quality(codec):
     assert cos_sim.mean() > 0.5
 
 
+def test_decode_to_matches_decode(codec):
+    """The vectorized decode_to path (used on GPU) must match legacy CPU decode."""
+    vectors = torch.nn.functional.normalize(torch.randn(50, 128), dim=1)
+    cids, packed = codec.encode(vectors)
+
+    legacy = codec.decode(cids, packed)  # now delegates to decode_to(cpu)
+    # Recompute via the pre-refactor helpers to guard against silent drift.
+    codes_old = codec._unpack_codes(packed)
+    res_old = codec._dequantize(codes_old)
+    manual = codec.centroids[torch.from_numpy(cids.astype(np.int64))] + res_old
+
+    assert legacy.dtype == torch.float32
+    assert torch.equal(legacy, manual)
+    # decode_to accepts torch-tensor inputs too (e.g. rows gathered from a shard).
+    from_tensors = codec.decode_to(torch.from_numpy(cids.astype(np.int64)),
+                                   torch.from_numpy(packed), "cpu")
+    assert torch.allclose(from_tensors, legacy, atol=1e-6)
+
+
 def test_bytes_per_vector(codec):
     assert codec.bytes_per_vector == 4 + 32  # 4 bytes centroid + 32 bytes for 2-bit residual
 

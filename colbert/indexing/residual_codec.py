@@ -41,6 +41,13 @@ class ResidualCodec:
         self._bucket_boundaries: torch.Tensor | None = None
         self._bucket_values: torch.Tensor | None = None
 
+        # Per-device caches for the vectorized decode path (populated lazily in
+        # ``decode_to``): centroids, bucket values, and the (byte_idx, bit_offset)
+        # gather indices used to unpack packed codes without a Python dim-loop.
+        self._centroids_by_device: dict[torch.device, torch.Tensor] = {}
+        self._bucket_values_by_device: dict[torch.device, torch.Tensor] = {}
+        self._unpack_index_by_device: dict[torch.device, Tuple[torch.Tensor, torch.Tensor]] = {}
+
     def set_quantization_params(self, sample_residuals: torch.Tensor) -> None:
         """Compute quantization bucket boundaries from sample residuals.
 
@@ -125,24 +132,94 @@ class ResidualCodec:
         centroid_ids: np.ndarray,
         packed_residuals: np.ndarray,
     ) -> torch.Tensor:
-        """Decompress to approximate vectors.
+        """Decompress to approximate vectors on the CPU.
+
+        Thin wrapper over :meth:`decode_to` (``device="cpu"``) so the CPU and GPU
+        decode paths share a single vectorized implementation and cannot drift.
 
         Args:
             centroid_ids: uint32 array of shape (n,).
             packed_residuals: uint8 array of shape (n, bytes_per_residual).
 
         Returns:
-            Approximate vectors of shape (n, dim).
+            Approximate vectors of shape (n, dim), fp32, on the CPU.
+        """
+        return self.decode_to(centroid_ids, packed_residuals, torch.device("cpu"))
+
+    def decode_to(
+        self,
+        centroid_ids,
+        packed_residuals,
+        device,
+    ) -> torch.Tensor:
+        """Vectorized decompress to approximate vectors on ``device``.
+
+        Fully vectorized (no Python loop over dims), so it runs efficiently on GPU.
+        ``centroid_ids`` / ``packed_residuals`` may be numpy arrays or torch tensors
+        (e.g. rows gathered from a shared-memory index); they are moved to ``device``.
+        Per-device tensors (centroids, bucket values, unpack gather indices) are cached.
+
+        Returns:
+            Approximate vectors of shape (n, dim) as fp32 on ``device``.
         """
         self._ensure_quantization_params()
+        device = torch.device(device)
 
-        codes = self._unpack_codes(packed_residuals)  # (n, dim)
-        residuals = self._dequantize(codes)  # (n, dim)
+        codes = self._unpack_codes_torch(packed_residuals, device)  # (n, dim) int64
+        residuals = self._dequantize_torch(codes, device)  # (n, dim) fp32
 
-        cids = torch.from_numpy(centroid_ids.astype(np.int64))
-        centroids = self.centroids[cids]  # (n, dim)
+        cids = torch.as_tensor(np.asarray(centroid_ids), device=device).to(torch.int64)
+        centroids = self._centroids_on(device)[cids]  # (n, dim)
 
         return centroids + residuals
+
+    def _centroids_on(self, device: torch.device) -> torch.Tensor:
+        cached = self._centroids_by_device.get(device)
+        if cached is None:
+            cached = self.centroids.to(device=device, dtype=torch.float32)
+            self._centroids_by_device[device] = cached
+        return cached
+
+    def _unpack_index_on(self, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Cached (byte_idx, bit_offset) gather tensors of shape (dim,) for unpacking."""
+        cached = self._unpack_index_by_device.get(device)
+        if cached is None:
+            codes_per_byte = 8 // self.nbits
+            d = torch.arange(self.dim, device=device)
+            byte_idx = (d // codes_per_byte).to(torch.int64)
+            bit_offset = ((d % codes_per_byte) * self.nbits).to(torch.int64)
+            cached = (byte_idx, bit_offset)
+            self._unpack_index_by_device[device] = cached
+        return cached
+
+    def _unpack_codes_torch(self, packed, device: torch.device) -> torch.Tensor:
+        """Unpack packed bytes to per-dim codes on ``device`` (no Python dim-loop).
+
+        Args:
+            packed: uint8 array/tensor of shape (n, num_bytes).
+            device: target device.
+
+        Returns:
+            int64 codes of shape (n, dim) with values in [0, num_levels).
+        """
+        packed_t = torch.as_tensor(np.asarray(packed), device=device).to(torch.int64)
+        byte_idx, bit_offset = self._unpack_index_on(device)
+        mask = (1 << self.nbits) - 1
+        # (n, dim): gather the byte holding each code, then shift+mask that code out.
+        gathered = packed_t[:, byte_idx]  # (n, dim)
+        codes = (gathered >> bit_offset) & mask
+        return codes
+
+    def _dequantize_torch(self, codes: torch.Tensor, device: torch.device) -> torch.Tensor:
+        """Dequantize per-dim codes to residuals on ``device`` via advanced indexing."""
+        assert self._bucket_values is not None
+        cached = self._bucket_values_by_device.get(device)
+        if cached is None:
+            cached = self._bucket_values.to(device=device, dtype=torch.float32)  # (dim, num_levels)
+            self._bucket_values_by_device[device] = cached
+        # residuals[i, d] = values[d, codes[i, d]]; arange(dim) broadcasts across rows.
+        d_idx = torch.arange(self.dim, device=device)
+        return cached[d_idx, codes]  # (n, dim)
 
     def _quantize(self, residuals: torch.Tensor) -> torch.Tensor:
         """Quantize residuals to integer codes.

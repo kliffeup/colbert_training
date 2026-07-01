@@ -90,40 +90,43 @@ def evaluate_lotte(
 
         retriever = ColBERTRetriever(model, index_dir, eval_config)
 
-        for query_type in query_types:
-            key = f"{topic}/{query_type}"
-            logger.info(f"Evaluating: {key}")
+        try:
+            for query_type in query_types:
+                key = f"{topic}/{query_type}"
+                logger.info(f"Evaluating: {key}")
 
-            _, queries_path, qrels_path = _get_lotte_paths(
-                topic, query_type, config.lotte_data_dir, split
-            )
+                _, queries_path, qrels_path = _get_lotte_paths(
+                    topic, query_type, config.lotte_data_dir, split
+                )
 
-            if not Path(queries_path).exists():
-                logger.warning(f"Queries not found: {queries_path}, skipping")
-                continue
-            if not Path(qrels_path).exists():
-                logger.warning(f"Qrels not found: {qrels_path}, skipping")
-                continue
+                if not Path(queries_path).exists():
+                    logger.warning(f"Queries not found: {queries_path}, skipping")
+                    continue
+                if not Path(qrels_path).exists():
+                    logger.warning(f"Qrels not found: {qrels_path}, skipping")
+                    continue
 
-            queries = Queries(queries_path)
-            qrels = load_qrels(qrels_path)
+                queries = Queries(queries_path)
+                qrels = load_qrels(qrels_path)
 
-            query_list = queries.items()
-            qid_list = [qid for qid, _ in query_list]
-            query_texts = [text for _, text in query_list]
+                query_list = queries.items()
+                qid_list = [qid for qid, _ in query_list]
+                query_texts = [text for _, text in query_list]
 
-            raw_results = retriever.retrieve(query_texts, top_k=5)
+                raw_results = retriever.retrieve(query_texts, top_k=5)
 
-            ranking = {
-                qid_list[q_idx]: raw_results[q_idx]
-                for q_idx in raw_results
-            }
+                ranking = {
+                    qid_list[q_idx]: raw_results[q_idx]
+                    for q_idx in raw_results
+                }
 
-            s_at_5 = success_at_k(ranking, qrels, k=5)
-            dataset_metrics = {"Success@5": s_at_5}
-            results[key] = dataset_metrics
+                s_at_5 = success_at_k(ranking, qrels, k=5)
+                dataset_metrics = {"Success@5": s_at_5}
+                results[key] = dataset_metrics
 
-            logger.info(f"  Success@5: {s_at_5:.4f}")
+                logger.info(f"  Success@5: {s_at_5:.4f}")
+        finally:
+            retriever.close()  # tear down any parallel scoring pool before the next topic
 
     # Report summary
     if results:

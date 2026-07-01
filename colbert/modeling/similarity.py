@@ -62,3 +62,35 @@ def colbert_score_packed(
         scores.append(score)
         offset += length
     return torch.stack(scores)
+
+
+def colbert_score_grouped(
+    sims: torch.Tensor,
+    segment_ids: torch.Tensor,
+    n_docs: int,
+) -> torch.Tensor:
+    """Vectorized grouped MaxSim over a flat similarity matrix.
+
+    Equivalent to :func:`colbert_score_packed` but takes the already-computed
+    ``Q @ D.t()`` matrix and a per-column document assignment, so the reduction is a
+    single ``scatter_reduce`` instead of a Python loop over documents. Used by the
+    parallel retriever to fold each tile of candidate embeddings into per-document
+    scores without materializing per-document slices.
+
+    Args:
+        sims: Similarity matrix of shape ``(qlen, n_cand)`` (``Q @ candidates.t()``).
+        segment_ids: ``(n_cand,)`` int64 tensor mapping each candidate column to a
+            dense document slot in ``[0, n_docs)``.
+        n_docs: Number of distinct document slots.
+
+    Returns:
+        Scores of shape ``(n_docs,)``: for each doc, max over its columns per query
+        token, then sum over query tokens.
+    """
+    qlen = sims.shape[0]
+    # Prefill with the dtype's min (NOT 0) — similarities can be negative, and any
+    # doc slot with no columns must not contribute a spurious 0 to the max.
+    buf = sims.new_full((qlen, n_docs), torch.finfo(sims.dtype).min)
+    idx = segment_ids.to(torch.int64).unsqueeze(0).expand(qlen, -1)  # (qlen, n_cand)
+    buf.scatter_reduce_(1, idx, sims, reduce="amax", include_self=True)
+    return buf.sum(dim=0)  # (n_docs,)

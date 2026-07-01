@@ -15,6 +15,7 @@ from colbert.config import ColBERTConfig
 from colbert.modeling.colbert import ColBERT
 from colbert.indexing.residual_codec import ResidualCodec
 from colbert.indexing.saver import IndexSaver
+from colbert.evaluation.parallel_scorer import ParallelMaxSimScorer
 
 logger = logging.getLogger(__name__)
 
@@ -27,35 +28,92 @@ class ColBERTRetriever:
         model: ColBERT,
         index_path: str,
         config: ColBERTConfig,
+        num_scorer_gpus: int | None = None,
+        tile_size: int = 200_000,
     ):
+        """
+        Args:
+            model: Loaded ColBERT model (used to encode queries on the master).
+            index_path: Directory holding the built index.
+            config: ColBERTConfig with retrieval knobs.
+            num_scorer_gpus: GPUs to fan MaxSim scoring across. Defaults to all visible
+                CUDA devices. When >1, a :class:`ParallelMaxSimScorer` pool is used and
+                the master does NOT load the (multi-hundred-GB) compressed arrays —
+                workers memory-map their shards. When <=1, scoring runs in-process.
+            tile_size: Candidate embeddings decoded per tile inside each worker.
+        """
         self.model = model
         self.config = config
         self.model.eval()
 
         saver = IndexSaver(index_path)
         self.codec = saver.load_codec()
-        self.centroid_ids, self.packed_residuals = saver.load_compressed_embeddings()
         self.doclens = saver.load_doclens()
         self.pids = saver.load_pids()
         self.inverted_lists = saver.load_inverted_lists()
         self.metadata = saver.load_metadata()
 
-        # Build embedding_id -> (doc_idx, token_offset) mapping
-        self._emb_to_doc: np.ndarray = np.zeros(len(self.centroid_ids), dtype=np.int32)
-        offset = 0
-        for doc_idx, doclen in enumerate(self.doclens):
-            self._emb_to_doc[offset:offset + doclen] = doc_idx
-            offset += doclen
-
-        # Build doc_idx -> (start_emb, end_emb) mapping
+        # Build doc_idx -> [start_emb, end_emb) mapping (cheap; needed by both paths).
         self._doc_offsets = np.zeros(len(self.doclens) + 1, dtype=np.int64)
         np.cumsum(self.doclens, out=self._doc_offsets[1:])
 
-        logger.info(
-            f"Loaded index: {len(self.pids)} passages, "
-            f"{len(self.centroid_ids)} embeddings, "
-            f"{len(self.inverted_lists)} centroids"
-        )
+        if num_scorer_gpus is None:
+            num_scorer_gpus = torch.cuda.device_count()
+
+        # Populated only on the in-process (single-device) path.
+        self.scorer: ParallelMaxSimScorer | None = None
+        self.centroid_ids: np.ndarray | None = None
+        self.packed_residuals: np.ndarray | None = None
+        self._emb_to_doc: np.ndarray | None = None
+
+        if num_scorer_gpus and num_scorer_gpus > 1:
+            # Parallel path: candidate generation (below) needs only the codec +
+            # inverted lists; workers memory-map the compressed shards themselves.
+            self.scorer = ParallelMaxSimScorer(
+                index_path=str(index_path),
+                codec_path=str(saver.index_dir / "codec.pt"),
+                doc_offsets=self._doc_offsets,
+                pids=self.pids,
+                config=config,
+                world_size=int(num_scorer_gpus),
+                device_type="cuda",
+                tile_size=tile_size,
+            )
+            logger.info(
+                f"Loaded index: {len(self.pids)} passages, "
+                f"{len(self.inverted_lists)} centroids "
+                f"(parallel MaxSim across {num_scorer_gpus} GPUs)"
+            )
+        else:
+            # In-process path: load compressed embeddings + embedding->doc map.
+            self.centroid_ids, self.packed_residuals = saver.load_compressed_embeddings()
+            self._emb_to_doc = np.zeros(len(self.centroid_ids), dtype=np.int32)
+            offset = 0
+            for doc_idx, doclen in enumerate(self.doclens):
+                self._emb_to_doc[offset:offset + doclen] = doc_idx
+                offset += doclen
+            logger.info(
+                f"Loaded index: {len(self.pids)} passages, "
+                f"{len(self.centroid_ids)} embeddings, "
+                f"{len(self.inverted_lists)} centroids"
+            )
+
+    def close(self) -> None:
+        """Tear down the scoring worker pool, if any. Idempotent."""
+        if self.scorer is not None:
+            self.scorer.close()
+
+    def __enter__(self) -> "ColBERTRetriever":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001 — best-effort teardown
+            pass
 
     @torch.no_grad()
     def retrieve(
@@ -96,6 +154,10 @@ class ColBERTRetriever:
     ) -> List[Tuple[str, float]]:
         """Retrieve for a single query.
 
+        Steps 1-2 (candidate generation) run on the master; scoring (Steps 3-6) is
+        delegated to the parallel worker pool when active, else to the in-process
+        reference path.
+
         Args:
             Q: Query embeddings of shape (qlen, dim).
             top_k: Number of passages to return.
@@ -104,7 +166,6 @@ class ColBERTRetriever:
             [(pid, score), ...] sorted by score descending. Pids are strings.
         """
         nprobe = self.config.nprobe
-        ncandidates = self.config.ncandidates
         device = Q.device
 
         # Step 1: Find nprobe nearest centroids for each query token
@@ -127,13 +188,36 @@ class ColBERTRetriever:
 
         candidate_emb_ids_arr = np.array(sorted(candidate_emb_ids), dtype=np.int64)
 
+        # Steps 3-6: score the candidate set (parallel pool or in-process fallback).
+        if self.scorer is not None:
+            return self.scorer.score(Q, candidate_emb_ids_arr, top_k)
+        return self._retrieve_single_local(Q, top_k, candidate_emb_ids_arr)
+
+    def _retrieve_single_local(
+        self,
+        Q: torch.Tensor,
+        top_k: int,
+        candidate_emb_ids_arr: np.ndarray,
+    ) -> List[Tuple[str, float]]:
+        """In-process MaxSim scoring for a single query (single-device / reference path).
+
+        This is the numerical reference the parallel scorer must match: approximate
+        MaxSim over candidate embeddings (Steps 3-4), select top-``ncandidates`` docs
+        (Step 5), then exact MaxSim re-rank (Step 6). Scores are computed in fp32.
+        """
+        assert self.centroid_ids is not None and self.packed_residuals is not None
+        assert self._emb_to_doc is not None
+        device = Q.device
+        ncandidates = self.config.ncandidates
+        Qf = Q.float()
+
         # Step 3: Decompress candidate embeddings and compute approximate scores
         cids = self.centroid_ids[candidate_emb_ids_arr]
         packed = self.packed_residuals[candidate_emb_ids_arr]
-        decompressed = self.codec.decode(cids, packed).to(device)  # (n_candidates, dim)
+        decompressed = self.codec.decode(cids, packed).to(device)  # (n_candidates, dim) fp32
 
         # (qlen, n_candidates)
-        sims = Q @ decompressed.t()
+        sims = Qf @ decompressed.t()
 
         # Step 4: Group by passage, approximate MaxSim
         doc_indices = self._emb_to_doc[candidate_emb_ids_arr]
@@ -160,10 +244,10 @@ class ColBERTRetriever:
 
             doc_cids = self.centroid_ids[start:end]
             doc_packed = self.packed_residuals[start:end]
-            doc_embs = self.codec.decode(doc_cids, doc_packed).to(device)  # (doclen, dim)
+            doc_embs = self.codec.decode(doc_cids, doc_packed).to(device)  # (doclen, dim) fp32
 
             # Exact MaxSim
-            sim = Q @ doc_embs.t()  # (qlen, doclen)
+            sim = Qf @ doc_embs.t()  # (qlen, doclen)
             score = sim.max(dim=1).values.sum().item()
 
             pid = str(self.pids[doc_idx])

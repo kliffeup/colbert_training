@@ -2,7 +2,11 @@
 
 import torch
 import pytest
-from colbert.modeling.similarity import colbert_score, colbert_score_packed
+from colbert.modeling.similarity import (
+    colbert_score,
+    colbert_score_packed,
+    colbert_score_grouped,
+)
 
 
 def test_colbert_score_shape():
@@ -41,3 +45,36 @@ def test_colbert_score_packed_basic():
 
     scores = colbert_score_packed(Q, D_packed, D_lengths)
     assert scores.shape == (2,)
+
+
+def test_colbert_score_grouped_matches_loop():
+    """Grouped scatter reduction equals the per-doc max-then-sum loop."""
+    torch.manual_seed(0)
+    qlen, dim = 6, 16
+    lengths = [3, 1, 4, 2]  # includes a single-token doc
+    seg = torch.tensor([i for i, L in enumerate(lengths) for _ in range(L)])
+    Q = torch.randn(qlen, dim)
+    D = torch.randn(seg.numel(), dim)
+    sims = Q @ D.t()
+
+    ref, off = [], 0
+    for L in lengths:
+        ref.append(sims[:, off:off + L].max(dim=1).values.sum())
+        off += L
+    ref = torch.stack(ref)
+
+    got = colbert_score_grouped(sims, seg, n_docs=len(lengths))
+    assert torch.allclose(got, ref, atol=1e-5)
+
+
+def test_colbert_score_grouped_all_negative():
+    """A query token whose similarities are all negative must not clamp to 0."""
+    sims = -torch.rand(4, 5) - 0.5  # strictly negative
+    seg = torch.tensor([0, 0, 1, 1, 1])
+    ref, off, lengths = [], 0, [2, 3]
+    for L in lengths:
+        ref.append(sims[:, off:off + L].max(dim=1).values.sum())
+        off += L
+    got = colbert_score_grouped(sims, seg, n_docs=2)
+    assert torch.allclose(got, torch.stack(ref), atol=1e-5)
+    assert (got < 0).all()

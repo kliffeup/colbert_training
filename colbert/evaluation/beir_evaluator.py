@@ -151,9 +151,12 @@ def evaluate_beir(
         qid_list = [qid for qid, _ in query_list]
         query_texts = [text for _, text in query_list]
 
-        raw_results = retriever.retrieve(
-            query_texts, top_k=1000, query_maxlen=query_maxlen,
-        )
+        try:
+            raw_results = retriever.retrieve(
+                query_texts, top_k=1000, query_maxlen=query_maxlen,
+            )
+        finally:
+            retriever.close()  # tear down any parallel scoring pool before the next dataset
 
         ranking = {
             qid_list[q_idx]: raw_results[q_idx]
